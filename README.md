@@ -52,7 +52,14 @@ cd KLIC-Codex-Switch
 ```bash
 ./install.sh
 ```
-> 앱이 `~/Applications`에 복사됩니다.
+> 앱이 `~/Applications`에 복사되고 LaunchAgent로 등록되어 로그인 시 자동 실행됩니다.
+
+### 더블클릭 설치 앱 만들기
+```bash
+./build-installer.sh
+open "build/Codex Account Switcher Installer.app"
+```
+> `build/Codex Account Switcher Installer.app`를 더블클릭하면 터미널 없이 설치할 수 있습니다.
 
 ---
 
@@ -111,11 +118,15 @@ cd KLIC-Codex-Switch
 
 ```
 KLIC-Codex-Switcher/
+├── Installer/
+│   └── main.swift          # 더블클릭 설치 앱
 ├── Sources/
 │   └── main.swift          # 전체 소스코드 (단일 파일)
 ├── Resources/
+│   ├── AppIconSource.png   # 앱 아이콘 원본
 │   ├── en.lproj/           # 영어 로컬라이제이션
 │   └── ko.lproj/           # 한국어 로컬라이제이션
+├── build-installer.sh      # 설치 앱 빌드 스크립트
 ├── build.sh                # 빌드 스크립트
 ├── install.sh              # 설치 스크립트
 ├── run.sh                  # 테스트 실행 스크립트
