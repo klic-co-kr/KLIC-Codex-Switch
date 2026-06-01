@@ -1,0 +1,48 @@
+# Build
+build/
+ModuleCache/
+.build/
+.swiftpm/
+derivedData/
+Packages/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+
+# Auth / Tokens (절대 커밋 금지)
+*.auth.json
+auth.json
+auth.json.backup
+.env
+.env.*
+*.secret
+*.pem
+*.p12
+*.keychain
+
+# Logs
+*.log
+npm-debug.log*
+
+# Misc
+*.tmp
+*.bak
+.cache/
+
+# AI assistant config
+AGENTS.md

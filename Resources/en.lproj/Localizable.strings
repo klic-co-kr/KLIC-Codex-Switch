@@ -1,0 +1,96 @@
+/* App */
+"app_name" = "Codex Account Switcher";
+"switching" = "Switching";
+
+/* Menu */
+"active_account" = "Active: %@ (%@)";
+"no_active_account" = "No active account";
+"usage_remaining" = "Usage remaining";
+"5hr" = "5hr";
+"weekly" = "Weekly";
+"no_accounts" = "No accounts available";
+"accounts" = "Accounts:";
+
+/* Status Bar */
+"status_5hr" = "%@ · 5hr %@";
+"status_weekly" = "%@ · W %@";
+"remaining_5hr" = "5h %@ left";
+"remaining_weekly" = "W %@ left";
+"switching_label" = "%@ · switching";
+
+/* Menu Actions */
+"toggle_account" = "Toggle Account";
+"add_account" = "Add Account...";
+"add_device_code" = "Add Account with Device Code...";
+"device_code_tooltip" = "Opens Terminal so the device code remains visible while login waits.";
+"display_labels" = "Account Display Labels";
+"remove_account" = "Remove Account";
+"refresh" = "Refresh";
+"quit" = "Quit Account Switcher";
+
+/* Labels */
+"set_label" = "Set %@ (%@)...";
+"clear_label" = "Clear %@";
+
+/* Alerts */
+"alert_set_label" = "Set display label";
+"alert_set_label_msg" = "Choose the label shown in the menu bar for %@. Pick an emoji below or type your own.";
+"save" = "Save";
+"cancel" = "Cancel";
+"alert_remove_title" = "Remove account?";
+"alert_remove_msg" = "Remove %@ from codex-auth switching?";
+"remove" = "Remove";
+"alert_cannot_toggle" = "Cannot toggle";
+"alert_cannot_toggle_msg" = "Toggle requires exactly two saved accounts and one active account.";
+"alert_token_save_failed" = "Could not save active token";
+"alert_switch_failed" = "Switch failed";
+"alert_relaunch_failed" = "Codex relaunch failed";
+"alert_device_login_failed" = "Device-code login failed";
+"alert_maintenance_failed" = "%@ failed";
+
+/* Maintenance */
+"adding_account" = "Adding account";
+"removing_account" = "Removing account";
+
+/* Errors */
+"err_no_accounts" = "No codex-auth accounts found.";
+"err_active_key" = "Could not read active_account_key from registry.json.";
+"err_auth_missing" = "Active auth file does not exist at %@.";
+"err_force_quit" = "Codex processes survived force quit: %@";
+"log_force_quitting" = "Force-quitting Codex App process tree...";
+"err_not_running" = "Codex App did not report as running after launch.";
+"err_not_found" = "codex-auth was not found in known locations.";
+
+/* Terminal */
+"terminal_complete" = "Codex account login finished and Codex App was relaunched. You can close this window.";
+
+/* Time */
+"am" = "AM";
+"pm" = "PM";
+"time_format" = "%@:%@ %@";
+
+/* Date */
+"date_format" = "%@ %@";
+
+/* Tooltip */
+"account_tooltip" = "Plan %@, 5h %@, weekly %@";
+
+/* Rotation */
+"rotation_on" = "Auto-rotation: ON";
+"rotation_off" = "Auto-rotation: OFF";
+"threshold" = "Threshold: %@%%";
+"status_rotation" = "%@ ⟳";
+
+/* Months */
+"Jan" = "January";
+"Feb" = "February";
+"Mar" = "March";
+"Apr" = "April";
+"May" = "May";
+"Jun" = "June";
+"Jul" = "July";
+"Aug" = "August";
+"Sep" = "September";
+"Oct" = "October";
+"Nov" = "November";
+"Dec" = "December";

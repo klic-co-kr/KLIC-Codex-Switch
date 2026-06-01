@@ -1,0 +1,96 @@
+/* App */
+"app_name" = "Codex 계정 전환기";
+"switching" = "전환 중";
+
+/* Menu */
+"active_account" = "활성: %@ (%@)";
+"no_active_account" = "활성 계정 없음";
+"usage_remaining" = "남은 사용량";
+"5hr" = "5시간";
+"weekly" = "주간";
+"no_accounts" = "사용 가능한 계정 없음";
+"accounts" = "계정:";
+
+/* Status Bar */
+"status_5hr" = "%@ · 5시 %@";
+"status_weekly" = "%@ · 주 %@";
+"remaining_5hr" = "5시간 %@ 남음";
+"remaining_weekly" = "주간 %@ 남음";
+"switching_label" = "%@ · 전환 중";
+
+/* Menu Actions */
+"toggle_account" = "계정 전환";
+"add_account" = "계정 추가...";
+"add_device_code" = "기기 코드로 계정 추가...";
+"device_code_tooltip" = "로그인 대기 중 기기 코드가 보이도록 터미널을 엽니다.";
+"display_labels" = "계정 표시 이름";
+"remove_account" = "계정 제거";
+"refresh" = "새로고침";
+"quit" = "계정 전환기 종료";
+
+/* Labels */
+"set_label" = "%@ (%@) 설정...";
+"clear_label" = "%@ 지우기";
+
+/* Alerts */
+"alert_set_label" = "표시 이름 설정";
+"alert_set_label_msg" = "메뉴바에 표시할 %@의 이름을 선택하세요. 아래 이모지를 고르거나 직접 입력하세요.";
+"save" = "저장";
+"cancel" = "취소";
+"alert_remove_title" = "계정을 제거하시겠습니까?";
+"alert_remove_msg" = "codex-auth 전환에서 %@을(를) 제거하시겠습니까?";
+"remove" = "제거";
+"alert_cannot_toggle" = "전환 불가";
+"alert_cannot_toggle_msg" = "전환하려면 저장된 계정이 정확히 2개이고 활성 계정이 1개여야 합니다.";
+"alert_token_save_failed" = "활성 토큰을 저장할 수 없습니다";
+"alert_switch_failed" = "전환 실패";
+"alert_relaunch_failed" = "Codex 재시작 실패";
+"alert_device_login_failed" = "기기 코드 로그인 실패";
+"alert_maintenance_failed" = "%@ 실패";
+
+/* Maintenance */
+"adding_account" = "계정 추가 중";
+"removing_account" = "계정 제거 중";
+
+/* Errors */
+"err_no_accounts" = "codex-auth 계정을 찾을 수 없습니다.";
+"err_active_key" = "registry.json에서 active_account_key를 읽을 수 없습니다.";
+"err_auth_missing" = "%@에 활성 인증 파일이 없습니다.";
+"err_force_quit" = "Codex 프로세스가 강제 종료되지 않았습니다: %@";
+"log_force_quitting" = "Codex 앱 프로세스 강제 종료 중...";
+"err_not_running" = "Codex 앱이 실행 후에도 실행 중으로 보고되지 않았습니다.";
+"err_not_found" = "알려진 위치에서 codex-auth를 찾을 수 없습니다.";
+
+/* Terminal */
+"terminal_complete" = "Codex 계정 로그인이 완료되고 Codex 앱이 재시작되었습니다. 이 창을 닫으셔도 됩니다.";
+
+/* Time */
+"am" = "오전";
+"pm" = "오후";
+"time_format" = "%3$@ %1$@:%2$@";
+
+/* Date */
+"date_format" = "%@ %@일";
+
+/* Tooltip */
+"account_tooltip" = "플랜 %@, 5시간 %@, 주간 %@";
+
+/* Rotation */
+"rotation_on" = "자동 전환: 켜짐";
+"rotation_off" = "자동 전환: 끔";
+"threshold" = "임계치: %@%%";
+"status_rotation" = "%@ ⟳";
+
+/* Months */
+"Jan" = "1월";
+"Feb" = "2월";
+"Mar" = "3월";
+"Apr" = "4월";
+"May" = "5월";
+"Jun" = "6월";
+"Jul" = "7월";
+"Aug" = "8월";
+"Sep" = "9월";
+"Oct" = "10월";
+"Nov" = "11월";
+"Dec" = "12월";
