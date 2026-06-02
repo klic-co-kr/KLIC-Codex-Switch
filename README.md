@@ -1,172 +1,243 @@
-# Codex Account Switcher
+# KLIC Codex Switcher
 
 <p align="center">
-  <strong>macOS 메뉴바에서 OpenAI Codex 계정을 한 번의 클릭으로 전환하세요.</strong>
+  <strong>macOS 메뉴바에서 OpenAI Codex 계정을 빠르게 전환하고, 남은 사용량까지 바로 확인하세요.</strong>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Swift-5.9+-orange.svg?style=flat-square" alt="Swift"/>
-  <img src="https://img.shields.io/badge/macOS-14.0+-black.svg?style=flat-square&logo=apple" alt="macOS"/>
-  <img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="MIT License"/>
-  <img src="https://img.shields.io/badge/Dependencies-none-brightgreen.svg?style=flat-square" alt="No Dependencies"/>
+  <img src="https://img.shields.io/badge/Swift-5.9+-orange.svg?style=flat-square" alt="Swift">
+  <img src="https://img.shields.io/badge/macOS-14.0+-black.svg?style=flat-square&logo=apple" alt="macOS">
+  <img src="https://img.shields.io/badge/AppKit-menu%20bar-blue.svg?style=flat-square" alt="AppKit menu bar">
+  <img src="https://img.shields.io/badge/Dependencies-none-brightgreen.svg?style=flat-square" alt="No dependencies">
+  <img src="https://img.shields.io/badge/License-MIT-informational.svg?style=flat-square" alt="MIT License">
+</p>
+
+<p align="center">
+  <img src="docs/assets/klic-codex-switcher-menu-preview.svg" alt="KLIC Codex Switcher menu preview" width="860">
+</p>
+
+<p align="center">
+  <a href="#-설치">설치</a> ·
+  <a href="#-주요-기능">주요 기능</a> ·
+  <a href="#-사용법">사용법</a> ·
+  <a href="#-cli">CLI</a>
 </p>
 
 ---
 
-## 🤔 이게 뭔가요?
+## 왜 필요한가요?
 
-여러 개의 OpenAI 계정(회사용, 개인용 등)을 사용하시나요? 계정을 바꿀 때마다 로그아웃 → 로그인을 반복하셨나요?
+회사 계정, 개인 계정, 팀 계정을 번갈아 쓰다 보면 Codex 계정 전환은 꽤 번거롭습니다. 매번 로그아웃하고 다시 로그인하거나, 어떤 계정의 5시간 사용량이 남았는지 확인하느라 흐름이 끊깁니다.
 
-**Codex Account Switcher**는 macOS 메뉴바에 앉아서, **클릭 한 번**으로 Codex 계정을 전환해줍니다.
+**KLIC Codex Switcher**는 그 작업을 macOS 메뉴바 한 곳으로 모읍니다.
+
+- 닉네임 기반 계정 목록으로 원문 계정 ID를 숨깁니다.
+- 5시간 / 주간 남은 사용량을 계정별로 보여줍니다.
+- 클릭 한 번으로 CLI와 Codex 앱의 계정 반영 범위를 제어합니다.
+- 상세 리셋 시간은 hover tooltip에서 확인할 수 있어 메뉴가 과하게 넓어지지 않습니다.
 
 ---
 
-## ✨ 주요 기능
+## 주요 기능
 
 | 기능 | 설명 |
-|------|------|
-| 🔄 **원클릭 전환** | 메뉴바 클릭 → 계정 선택 → 끝 |
-| ➕ **쉬운 계정 추가** | 브라우저 로그인 또는 디바이스 코드 방식 지원 |
-| 📊 **사용량 표시** | 5시간 / 주간 사용 한계를 메뉴바에서 실시간 확인 |
-| 🏷️ **계정 별명** | `회사`, `개인`, `🚀` 등 원하는 이름으로 표시 |
-| 🔒 **안전한 OAuth** | 공식 OAuth 2.0 PKCE 인증, 비밀번호 저장 없음 |
-| ⚡ **가벼운 앱** | 외부 의존성 제로, 순수 Swift 300KB 미만 |
+|---|---|
+| 빠른 계정 전환 | 메뉴바에서 계정을 선택하면 `~/.codex/auth.json`을 새 계정으로 교체합니다. |
+| Codex 앱 반영 | 실행 중인 Codex 앱을 재시작해 전환한 계정을 즉시 반영할 수 있습니다. |
+| 계정별 사용량 | 활성 계정뿐 아니라 다른 저장 계정의 5시간 / 주간 잔여량도 같이 봅니다. |
+| 닉네임 표시 | `회사`, `개인`, `my1`처럼 짧은 이름으로 계정을 구분합니다. |
+| 전환 범위 설정 | CLI 다음 실행 적용, Codex 앱 즉시 반영, 앱 자동 실행을 각각 켜고 끕니다. |
+| 네이티브 OAuth | 외부 `codex-auth` 의존 없이 OAuth 2.0 PKCE 흐름을 앱 안에서 처리합니다. |
+| 설치앱 제공 | 터미널 없이 더블클릭 설치 가능한 설치 앱을 빌드할 수 있습니다. |
 
 ---
 
-## 📦 설치 (3단계)
+## 설치
 
-### 1단계: 다운로드
+### 1. 저장소 받기
+
 ```bash
 git clone https://github.com/klic-co-kr/KLIC-Codex-Switch.git
 cd KLIC-Codex-Switch
 ```
 
-### 2단계: 빌드
+### 2. 메뉴바 앱 빌드
+
 ```bash
 ./build.sh
 ```
-> `build/Codex Account Switcher.app` 파일이 생성됩니다.
 
-### 3단계: 설치
+빌드 결과:
+
+```text
+build/Codex Account Switcher.app
+```
+
+### 3. 현재 사용자 계정에 설치
+
 ```bash
 ./install.sh
 ```
-> 앱이 `~/Applications`에 복사되고 LaunchAgent로 등록되어 로그인 시 자동 실행됩니다.
 
-### 더블클릭 설치 앱 만들기
+설치 결과:
+
+- 앱: `~/Applications/Codex Account Switcher.app`
+- 자동 실행: `~/Library/LaunchAgents/local.codex-account-switcher.menu-bar.plist`
+- 로그: `~/Library/Logs/CodexAccountSwitcher.log`
+
+### 더블클릭 설치앱 만들기
+
 ```bash
 ./build-installer.sh
 open "build/Codex Account Switcher Installer.app"
 ```
-> `build/Codex Account Switcher Installer.app`를 더블클릭하면 터미널 없이 설치할 수 있습니다.
 
 ---
 
-## 🚀 사용법
+## 사용법
 
-### 처음 실행하기
+### 계정 추가
 
-1. 앱을 실행하면 메뉴바에 아이콘이 나타납니다
-2. 클릭 → **"Add Account (Browser)"** 선택
-3. 브라우저에서 OpenAI 로그인 → 완료!
-4. 추가할 계정만큼 반복
+1. 메뉴바의 Codex Account Switcher를 엽니다.
+2. **계정 추가...** 또는 **기기 코드로 계정 추가...**를 선택합니다.
+3. OpenAI 로그인 완료 후 계정이 목록에 추가됩니다.
 
-### 계정 전환하기
+### 계정 전환
 
-1. 메뉴바 클릭
-2. 전환할 계정 클릭
-3. Codex 앱이 자동으로 재시작되며 새 계정으로 연결됩니다
+1. 메뉴바를 엽니다.
+2. 원하는 닉네임의 계정을 클릭합니다.
+3. 설정된 전환 범위에 따라 CLI / Codex 앱에 반영됩니다.
 
-### 전환 적용 범위 설정하기
+### 닉네임 설정
 
-메뉴의 **전환 적용 범위**에서 계정 전환이 어디까지 반영될지 선택할 수 있습니다.
+메뉴의 **계정 표시 이름**에서 계정별 표시 이름을 바꿀 수 있습니다.
 
-| 옵션 | 설명 |
-|------|------|
-| CLI 다음 실행 적용 | `~/.codex/auth.json`을 바꿔 다음 `codex` 실행부터 새 계정을 사용합니다 |
-| Codex 앱 즉시 반영 | Codex 앱이 실행 중이면 재시작해서 새 계정을 즉시 반영합니다 |
-| 앱이 꺼져 있으면 실행 | Codex 앱이 꺼져 있을 때도 전환 후 앱을 자동 실행합니다 |
+추천 예시:
 
-### 계정 이름 변경하기
-
-메뉴에서 계정 이름을 **"회사"**, **"개인"**, **"🚀"** 등으로 바꿀 수 있습니다.
-
----
-
-## 🛠️ 개발자용
-
-### 빌드 없이 바로 실행 (테스트용)
-```bash
-./run.sh
+```text
+회사
+개인
+팀
+my1
+🚀
 ```
 
-### 기술 스택
-- **언어**: Swift 5.9+
-- **플랫폼**: macOS 14.0+ (Sonoma)
-- **의존성**: 없음 (순수 Swift + AppKit)
-- **인증**: OAuth 2.0 PKCE
+### 전환 적용 범위
 
-### CLI 명령어
+| 옵션 | 설명 |
+|---|---|
+| CLI 다음 실행 | 다음 `codex` 실행부터 선택한 계정을 사용합니다. |
+| Codex 앱 반영 | Codex 앱이 실행 중이면 재시작해 즉시 반영합니다. |
+| 꺼져 있으면 실행 | Codex 앱이 꺼져 있어도 전환 후 자동 실행합니다. |
+
+---
+
+## CLI
+
+앱 번들은 메뉴바 앱이지만, 내부 실행 파일은 CLI 명령도 지원합니다.
+
 ```bash
-# 현재 계정 목록
+# 계정 목록
 ./run.sh -- list
 
-# 계정 전환
-./run.sh -- switch <이메일>
+# 활성 계정
+./run.sh -- active
 
 # 사용량 확인
 ./run.sh -- usage
 
-# 자동 전환 설정
-./run.sh -- rotation <on|off>
+# 계정 전환
+./run.sh -- switch <key 또는 email>
 
-# 전환 적용 범위
+# 자동 전환 상태
+./run.sh -- rotation status
+
+# 전환 범위 상태
 ./run.sh -- scope status
-./run.sh -- scope cli <on|off>
-./run.sh -- scope app <on|off>
-./run.sh -- scope launch <on|off>
 ```
 
 ---
 
-## 📁 프로젝트 구조
+## 개발
 
+```bash
+# 빌드 없이 실행
+./run.sh
+
+# 메뉴바 앱 빌드
+./build.sh
+
+# 설치앱 빌드
+./build-installer.sh
 ```
+
+### 테스트
+
+```bash
+bash tests/menu_bar_visibility_test.sh
+bash tests/menu_style_test.sh
+bash tests/account_usage_rows_test.sh
+bash tests/status_line_test.sh
+bash tests/switch_scope_test.sh
+bash tests/package_artifacts_test.sh
+bash tests/install_launch_agent_test.sh
+```
+
+### 기술 스택
+
+- Swift 5.9+
+- AppKit
+- WebKit
+- OAuth 2.0 PKCE
+- LaunchAgent
+- 외부 런타임 의존성 없음
+
+---
+
+## 프로젝트 구조
+
+```text
 KLIC-Codex-Switcher/
 ├── Installer/
-│   └── main.swift          # 더블클릭 설치 앱
+│   └── main.swift
 ├── Sources/
-│   └── main.swift          # 전체 소스코드 (단일 파일)
+│   └── main.swift
 ├── Resources/
-│   ├── AppIconSource.png   # 앱 아이콘 원본
-│   ├── en.lproj/           # 영어 로컬라이제이션
-│   └── ko.lproj/           # 한국어 로컬라이제이션
-├── build-installer.sh      # 설치 앱 빌드 스크립트
-├── build.sh                # 빌드 스크립트
-├── install.sh              # 설치 스크립트
-├── run.sh                  # 테스트 실행 스크립트
-└── docs/                   # 설계 문서
+│   ├── AppIconSource.png
+│   ├── en.lproj/
+│   └── ko.lproj/
+├── docs/
+│   └── assets/
+│       └── klic-codex-switcher-menu-preview.svg
+├── tests/
+├── build-installer.sh
+├── build.sh
+├── install.sh
+└── run.sh
 ```
 
 ---
 
-## ❓ 자주 묻는 질문
+## FAQ
 
-**Q: 비밀번호가 저장되나요?**
-A: 아니요. OAuth 토큰만 로컬에 저장되며, 비밀번호는 절대 저장하지 않습니다.
+**비밀번호를 저장하나요?**
 
-**Q: 어느 폴더에 데이터가 저장되나요?**
-A: `~/.codex/` 폴더에 계정 정보가 저장됩니다.
+아니요. 브라우저/OAuth 흐름을 통해 받은 토큰만 로컬에 저장합니다.
 
-**Q: Codex CLI도 같이 전환되나요?**
-A: 네, Codex CLI와 Codex 데스크톱 앱 모두 동일한 계정으로 전환됩니다.
+**Codex CLI도 같이 바뀌나요?**
 
-**Q: 최대 몇 개의 계정을 추가할 수 있나요?**
-A: 제한이 없습니다.
+네. 기본 설정에서는 CLI 다음 실행과 Codex 앱 반영을 함께 처리합니다.
+
+**Codex 앱이 꺼져 있으면 어떻게 되나요?**
+
+메뉴에서 **꺼져 있으면 실행**을 켜면 전환 후 Codex 앱을 자동 실행합니다.
+
+**계정 ID가 메뉴에 그대로 보이나요?**
+
+아니요. 메뉴 UI는 닉네임 중심으로 표시하고, 세부 정보는 필요한 곳에서만 tooltip으로 확인합니다.
 
 ---
 
-## 📝 라이선스
+## License
 
-MIT License. 자세한 내용은 [LICENSE](LICENSE) 파일을 참고하세요.
+[MIT](LICENSE)

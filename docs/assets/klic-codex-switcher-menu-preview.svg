@@ -1,0 +1,94 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>KLIC Codex Switcher menu preview</title>
+  <desc>Promotional preview of the KLIC Codex Switcher macOS menu bar app with nickname-based account switching and usage remaining.</desc>
+  <defs>
+    <filter id="panel-shadow" x="42" y="32" width="1116" height="682" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+    <linearGradient id="menu-fill" x1="600" y1="88" x2="600" y2="704" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#191B24"/>
+      <stop offset="1" stop-color="#111318"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="760" rx="36" fill="#0D1220"/>
+  <rect x="0" y="0" width="1200" height="74" fill="#11182A"/>
+
+  <g transform="translate(44 18)">
+    <rect width="330" height="38" rx="19" fill="#202A40"/>
+    <rect x="12" y="7" width="24" height="24" rx="6" fill="#0E1726" stroke="#4B5563"/>
+    <path d="M19 19.5h10M24 14.5v10" stroke="#38BDF8" stroke-width="2" stroke-linecap="round"/>
+    <text x="48" y="26" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="23" font-weight="700">회사 · 5시간 100% 남음</text>
+  </g>
+
+  <g transform="translate(442 18)" opacity="0.9">
+    <circle cx="20" cy="19" r="17" fill="#6D5DF7"/>
+    <path d="M14 14h12v10H14zM26 19h5v5h-5" stroke="white" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="94" cy="19" r="14" stroke="#E5E7EB" stroke-width="5" stroke-dasharray="42 18"/>
+    <circle cx="174" cy="19" r="16" fill="#4B5563"/>
+    <path d="M247 9l-19 20M237 8a15 15 0 1 1-10 27" stroke="#F8FAFC" stroke-width="3" stroke-linecap="round"/>
+    <path d="M318 19h34M324 13h22M330 7h10" stroke="#E5E7EB" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="438" cy="19" r="10" stroke="#E5E7EB" stroke-width="3"/>
+    <path d="m446 27 9 9" stroke="#E5E7EB" stroke-width="3" stroke-linecap="round"/>
+  </g>
+
+  <g filter="url(#panel-shadow)">
+    <rect x="64" y="88" width="1072" height="616" rx="24" fill="url(#menu-fill)" stroke="#4B5563" stroke-width="2"/>
+  </g>
+
+  <g transform="translate(104 122)">
+    <circle cx="26" cy="28" r="15" fill="#0B84FF"/>
+    <path d="M19 31l5 5 11-14" stroke="#0D1220" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="72" y="28" fill="#F9FAFB" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="30" font-weight="800">회사</text>
+    <text x="72" y="64" fill="#A1A1AA" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="22" font-weight="600">5시간 100% · 주간 68%</text>
+    <text x="904" y="30" text-anchor="end" fill="#60A5FA" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="22" font-weight="800">Pro</text>
+  </g>
+
+  <line x1="104" y1="224" x2="1096" y2="224" stroke="#3F4656" stroke-width="2"/>
+
+  <g transform="translate(104 258)">
+    <text x="0" y="0" fill="#71717A" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="21" font-weight="700">남은 사용량</text>
+    <g transform="translate(0 38)">
+      <text x="0" y="26" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20" font-weight="700">5시간</text>
+      <text x="92" y="26" fill="#2DD4BF" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="800">100%</text>
+      <text x="258" y="26" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20" font-weight="700">주간</text>
+      <text x="334" y="26" fill="#818CF8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="800">68%</text>
+    </g>
+    <text x="0" y="98" fill="#71717A" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="17" font-weight="600">상세 리셋 시간은 hover tooltip에서 확인</text>
+  </g>
+
+  <line x1="104" y1="392" x2="1096" y2="392" stroke="#3F4656" stroke-width="2"/>
+
+  <g transform="translate(104 432)" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <text x="0" y="0" fill="#71717A" font-size="21" font-weight="700">계정</text>
+
+    <g transform="translate(0 36)">
+      <text x="-30" y="27" fill="#F9FAFB" font-size="30">✓</text>
+      <text x="0" y="26" fill="#F9FAFB" font-size="24" font-weight="800">회사</text>
+      <text x="170" y="26" fill="#E5E7EB" font-size="23" font-weight="700">5시간 100%</text>
+      <text x="470" y="26" fill="#E5E7EB" font-size="23" font-weight="700">주간 68%</text>
+    </g>
+
+    <g transform="translate(0 86)">
+      <circle cx="-18" cy="18" r="10" stroke="#D1D5DB" stroke-width="3"/>
+      <text x="0" y="26" fill="#F9FAFB" font-size="24" font-weight="800">my1</text>
+      <text x="170" y="26" fill="#E5E7EB" font-size="23" font-weight="700">5시간 0%</text>
+      <text x="470" y="26" fill="#E5E7EB" font-size="23" font-weight="700">주간 50%</text>
+    </g>
+
+    <g transform="translate(0 136)">
+      <circle cx="-18" cy="18" r="10" stroke="#D1D5DB" stroke-width="3"/>
+      <text x="0" y="26" fill="#F9FAFB" font-size="24" font-weight="800">my2</text>
+      <text x="170" y="26" fill="#E5E7EB" font-size="23" font-weight="700">5시간 99%</text>
+      <text x="470" y="26" fill="#E5E7EB" font-size="23" font-weight="700">주간 51%</text>
+    </g>
+  </g>
+
+  <line x1="104" y1="628" x2="1096" y2="628" stroke="#3F4656" stroke-width="2"/>
+
+  <g transform="translate(104 664)" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="23" font-weight="700" fill="#F8FAFC">
+    <text x="0" y="0">계정 전환</text>
+    <text x="234" y="0">계정 추가</text>
+    <text x="468" y="0">새로고침</text>
+  </g>
+</svg>
