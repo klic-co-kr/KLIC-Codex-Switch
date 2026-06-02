@@ -25,9 +25,56 @@ struct CodexAccount {
     let isActive: Bool
 }
 
-enum UsageDisplayMode: String {
-    case fiveHour
-    case weekly
+private struct SwitchScope {
+    let applyToCLI: Bool
+    let reflectCodexApp: Bool
+    let launchCodexIfClosed: Bool
+}
+
+private enum SwitchScopeDefaults {
+    private static let applyToCLIKey = "switchScopeApplyToCLI"
+    private static let reflectCodexAppKey = "switchScopeReflectCodexApp"
+    private static let launchCodexIfClosedKey = "switchScopeLaunchCodexIfClosed"
+    private static let defaults: UserDefaults = {
+        if let suiteName = ProcessInfo.processInfo.environment["CODEX_SWITCHER_DEFAULTS_SUITE"],
+           let suite = UserDefaults(suiteName: suiteName) {
+            return suite
+        }
+        return .standard
+    }()
+
+    static func current() -> SwitchScope {
+        SwitchScope(
+            applyToCLI: bool(forKey: applyToCLIKey, defaultValue: true),
+            reflectCodexApp: bool(forKey: reflectCodexAppKey, defaultValue: true),
+            launchCodexIfClosed: bool(forKey: launchCodexIfClosedKey, defaultValue: false)
+        )
+    }
+
+    static func setApplyToCLI(_ value: Bool) {
+        defaults.set(value, forKey: applyToCLIKey)
+        if !value {
+            defaults.set(false, forKey: reflectCodexAppKey)
+        }
+    }
+
+    static func setReflectCodexApp(_ value: Bool) {
+        if value {
+            defaults.set(true, forKey: applyToCLIKey)
+        }
+        defaults.set(value, forKey: reflectCodexAppKey)
+    }
+
+    static func setLaunchCodexIfClosed(_ value: Bool) {
+        defaults.set(value, forKey: launchCodexIfClosedKey)
+    }
+
+    private static func bool(forKey key: String, defaultValue: Bool) -> Bool {
+        guard defaults.object(forKey: key) != nil else {
+            return defaultValue
+        }
+        return defaults.bool(forKey: key)
+    }
 }
 
 struct CommandResult {
@@ -64,6 +111,10 @@ private enum FetchResult {
 private struct HTTPResult {
     let data: Data?
     let response: HTTPURLResponse?
+}
+
+private func codexHomeDirectory() -> String {
+    ProcessInfo.processInfo.environment["CODEX_SWITCHER_HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
 }
 
 private func encodeKey(_ key: String) -> String {
@@ -182,7 +233,7 @@ private func cliRefreshToken(refreshToken: String) -> (accessToken: String, newR
 }
 
 private func cliReadAccounts() -> [(key: String, email: String, auth: [String: Any], isActive: Bool)] {
-    let home = NSHomeDirectory()
+    let home = codexHomeDirectory()
     let accountsDir = "\(home)/.codex/accounts"
     let fm = FileManager.default
 
@@ -220,7 +271,7 @@ private func cliReadAccounts() -> [(key: String, email: String, auth: [String: A
 }
 
 private func cliSyncActiveSnapshot() -> String? {
-    let home = NSHomeDirectory()
+    let home = codexHomeDirectory()
     let registryURL = URL(fileURLWithPath: "\(home)/.codex/accounts/registry.json")
     let activeAuthURL = URL(fileURLWithPath: "\(home)/.codex/auth.json")
 
@@ -246,7 +297,7 @@ private func cliSyncActiveSnapshot() -> String? {
 }
 
 private func cliUpdateRegistry(_ key: String?) -> String? {
-    let home = NSHomeDirectory()
+    let home = codexHomeDirectory()
     let accountsDir = "\(home)/.codex/accounts"
     let registryURL = URL(fileURLWithPath: "\(accountsDir)/registry.json")
     try? FileManager.default.createDirectory(atPath: accountsDir, withIntermediateDirectories: true)
@@ -272,7 +323,8 @@ private func cliUpdateRegistry(_ key: String?) -> String? {
     }
 }
 
-private func cliRestartCodex() -> CommandResult {
+private func cliRestartCodex(launchIfNotRunning: Bool = true) -> CommandResult {
+    let wasRunning = !cliCodexPIDs().isEmpty
     for attempt in 1...6 {
         let pids = cliCodexPIDs()
         if pids.isEmpty { break }
@@ -283,6 +335,9 @@ private func cliRestartCodex() -> CommandResult {
     let remaining = cliCodexPIDs()
     if !remaining.isEmpty {
         return CommandResult(status: 1, output: "Codex processes survived force quit: \(remaining.joined(separator: ", "))")
+    }
+    if !wasRunning && !launchIfNotRunning {
+        return CommandResult(status: 0, output: "Codex App was not running; launch skipped.")
     }
     let openResult = cliRun("/usr/bin/open", ["-a", "Codex"])
     if openResult.status != 0 { return openResult }
@@ -307,6 +362,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let refreshInterval: TimeInterval = 5
     private let usageCacheInterval: TimeInterval = 60
     private let labelsDefaultsKey = "accountDisplayLabels"
+    private let menuSummaryWidth: CGFloat = 300
+    private let menuSideInset: CGFloat = 14
     private var refreshTimer: Timer?
     private var accounts: [CodexAccount] = []
     private var lastError: String?
@@ -317,7 +374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var switchAnimationFrame = 0
     private var switchingTitle = NSLocalizedString("switching", comment: "")
     private let switchAnimationFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    private var cachedUsage: ParsedUsage?
+    private var cachedUsageByAccount: [String: ParsedUsage] = [:]
     private var lastUsageFetch: Date?
     private var rotationEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "rotationEnabled") }
@@ -329,15 +386,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return val > 0 ? val : 80
         }
         set { UserDefaults.standard.set(newValue, forKey: "rotationThreshold") }
-    }
-
-    private var usageMode: UsageDisplayMode {
-        get {
-            UsageDisplayMode(rawValue: UserDefaults.standard.string(forKey: "usageDisplayMode") ?? "") ?? .weekly
-        }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: "usageDisplayMode")
-        }
     }
 
     // MARK: Lifecycle
@@ -357,13 +405,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureStatusButton() {
         guard let button = statusItem.button else { return }
-        button.title = ""
+        button.title = statusIdleTitle()
         button.toolTip = NSLocalizedString("app_name", comment: "")
-        button.image = loadCodexIcon()
+        button.image = loadStatusBarIcon()
         button.imagePosition = .imageLeft
     }
 
-    private func loadCodexIcon() -> NSImage? {
+    private func loadStatusBarIcon() -> NSImage? {
+        if let bundledIcon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let image = NSImage(contentsOf: bundledIcon) {
+            image.size = NSSize(width: 18, height: 18)
+            return image
+        }
+
         let candidates = [
             "/Applications/Codex.app/Contents/Resources/icon.icns",
             "/Applications/Codex.app/Contents/Resources/codexTemplate@2x.png",
@@ -372,7 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard let path = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }),
               let image = NSImage(contentsOfFile: path) else {
-            return nil
+            return styledMenuIcon("arrow.left.arrow.right.circle", description: NSLocalizedString("app_name", comment: ""))
         }
         image.size = NSSize(width: 18, height: 18)
         return image
@@ -386,8 +440,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .utility).async {
             let (accountInfos, _) = self.readAccountFiles()
 
-            var activeAccountKey: String?
-            var allUsage: [String: ParsedUsage] = [:]
+            var activeAccountKey = accountInfos.first(where: { $0.isActive })?.key
+            var allUsage: [String: ParsedUsage] = DispatchQueue.main.sync {
+                self.cachedUsageByAccount
+            }
 
             let shouldFetch: Bool = DispatchQueue.main.sync {
                 self.lastUsageFetch == nil ||
@@ -412,19 +468,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 DispatchQueue.main.sync {
                     self.lastUsageFetch = Date()
-                    if let activeKey = accountInfos.first(where: { $0.isActive })?.key,
-                       let activeUsage = allUsage[activeKey] {
-                        self.cachedUsage = activeUsage
-                    }
+                    self.cachedUsageByAccount = allUsage
                 }
             } else {
-                let staleCache: ParsedUsage? = DispatchQueue.main.sync { self.cachedUsage }
-                if let activeInfo = accountInfos.first(where: { $0.isActive }) {
-                    activeAccountKey = activeInfo.key
-                    if let stale = staleCache {
-                        allUsage[activeInfo.key] = stale
-                    }
+                let staleCache: [String: ParsedUsage] = DispatchQueue.main.sync {
+                    self.cachedUsageByAccount
                 }
+                allUsage = staleCache
             }
 
             var accounts: [CodexAccount] = []
@@ -480,32 +530,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !isSwitching {
                 statusItem.button?.title = statusTitle(for: active)
             }
-            menu.addItem(headerItem(String(format: NSLocalizedString("active_account", comment: ""), active.email, displayPlan(active.plan))))
+            menu.addItem(activeSummaryItem(for: active))
         } else {
             if !isSwitching {
-                statusItem.button?.title = ""
+                statusItem.button?.title = statusIdleTitle()
             }
-            menu.addItem(headerItem(lastError ?? NSLocalizedString("no_active_account", comment: "")))
+            menu.addItem(headerItem(lastError ?? NSLocalizedString("no_active_account", comment: ""), symbol: "exclamationmark.circle"))
         }
 
         menu.addItem(.separator())
 
         if let active = accounts.first(where: { $0.isActive }) {
-            let usageHeader = headerItem(NSLocalizedString("usage_remaining", comment: ""))
-            usageHeader.image = NSImage(systemSymbolName: "gauge.with.dots.needle.bottom.50percent", accessibilityDescription: NSLocalizedString("usage_remaining", comment: ""))
-            menu.addItem(usageHeader)
-            menu.addItem(usageModeItem(
-                title: NSLocalizedString("5hr", comment: ""),
-                percent: remainingPercentText(fromUsed: active.fiveHourUsedPercent),
-                reset: resetTimeText(from: active.fiveHourResetAt),
-                mode: .fiveHour
-            ))
-            menu.addItem(usageModeItem(
-                title: NSLocalizedString("weekly", comment: ""),
-                percent: remainingPercentText(fromUsed: active.weeklyUsedPercent),
-                reset: resetDateText(from: active.weeklyResetAt),
-                mode: .weekly
-            ))
+            menu.addItem(headerItem(NSLocalizedString("usage_remaining", comment: ""), symbol: "gauge.medium"))
+            menu.addItem(usageCombinedItem(for: active))
             menu.addItem(.separator())
         }
 
@@ -517,32 +554,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let rotItem = NSMenuItem(title: rotTitle, action: #selector(toggleRotation), keyEquivalent: "")
             rotItem.target = self
             rotItem.isEnabled = !isSwitching
-            if rotationEnabled {
-                rotItem.image = NSImage(systemSymbolName: "arrow.2.circlepath", accessibilityDescription: nil)
-            }
+            rotItem.state = rotationEnabled ? .on : .off
+            rotItem.image = styledMenuIcon(rotationEnabled ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath", description: rotTitle)
             menu.addItem(rotItem)
 
             let threshStr = String(format: NSLocalizedString("threshold", comment: ""), "\(rotationThreshold)")
             let threshItem = NSMenuItem(title: threshStr, action: #selector(cycleThreshold), keyEquivalent: "")
             threshItem.target = self
             threshItem.isEnabled = rotationEnabled && !isSwitching
+            threshItem.image = styledMenuIcon("slider.horizontal.3", description: threshStr)
             menu.addItem(threshItem)
 
             menu.addItem(.separator())
         }
 
+        let scope = SwitchScopeDefaults.current()
+        menu.addItem(headerItem(NSLocalizedString("switch_scope", comment: ""), symbol: "slider.horizontal.2.square"))
+        menu.addItem(scopeToggleItem(
+            title: String(format: NSLocalizedString(scope.applyToCLI ? "scope_cli_on" : "scope_cli_off", comment: "")),
+            action: #selector(toggleScopeCLI),
+            state: scope.applyToCLI,
+            enabled: !isSwitching,
+            symbol: "terminal"
+        ))
+        menu.addItem(scopeToggleItem(
+            title: String(format: NSLocalizedString(scope.reflectCodexApp ? "scope_app_on" : "scope_app_off", comment: "")),
+            action: #selector(toggleScopeApp),
+            state: scope.reflectCodexApp,
+            enabled: !isSwitching && scope.applyToCLI,
+            symbol: "macwindow"
+        ))
+        menu.addItem(scopeToggleItem(
+            title: String(format: NSLocalizedString(scope.launchCodexIfClosed ? "scope_launch_on" : "scope_launch_off", comment: "")),
+            action: #selector(toggleScopeLaunch),
+            state: scope.launchCodexIfClosed,
+            enabled: !isSwitching && scope.reflectCodexApp,
+            symbol: "play.circle"
+        ))
+        menu.addItem(.separator())
+
         if accounts.isEmpty {
             let item = NSMenuItem(title: lastError ?? NSLocalizedString("no_accounts", comment: ""), action: nil, keyEquivalent: "")
             item.isEnabled = false
+            item.image = styledMenuIcon("exclamationmark.circle", description: item.title)
             menu.addItem(item)
         } else {
-            menu.addItem(headerItem(NSLocalizedString("accounts", comment: "")))
+            menu.addItem(headerItem(NSLocalizedString("accounts", comment: ""), symbol: "person.2"))
             for account in accounts {
                 let item = NSMenuItem(title: "", action: #selector(switchAccount(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = account.key
-                item.attributedTitle = accountAttributedTitle(label: displayLabel(for: account), email: account.email)
+                item.attributedTitle = accountAttributedTitle(for: account)
                 item.state = account.isActive ? .on : .off
+                item.image = styledMenuIcon(account.isActive ? "person.crop.circle.fill.badge.checkmark" : "person.crop.circle", description: displayLabel(for: account))
                 item.toolTip = String(format: NSLocalizedString("account_tooltip", comment: ""),
                     account.plan,
                     usageDisplayString(percent: account.fiveHourUsedPercent, resetAt: account.fiveHourResetAt),
@@ -557,6 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let toggle = NSMenuItem(title: NSLocalizedString("toggle_account", comment: ""), action: #selector(toggleAccount), keyEquivalent: "")
         toggle.target = self
         toggle.isEnabled = accounts.count == 2 && !isSwitching
+        toggle.image = styledMenuIcon("arrow.left.arrow.right.circle", description: toggle.title)
         menu.addItem(toggle)
 
         menu.addItem(.separator())
@@ -564,33 +629,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let addAccount = NSMenuItem(title: NSLocalizedString("add_account", comment: ""), action: #selector(addAccountBrowser), keyEquivalent: "")
         addAccount.target = self
         addAccount.isEnabled = !isSwitching
+        addAccount.image = styledMenuIcon("plus.circle", description: addAccount.title)
         menu.addItem(addAccount)
 
         let addDevice = NSMenuItem(title: NSLocalizedString("add_device_code", comment: ""), action: #selector(addAccountDeviceCode), keyEquivalent: "")
         addDevice.target = self
         addDevice.isEnabled = !isSwitching
+        addDevice.image = styledMenuIcon("key", description: addDevice.title)
         addDevice.toolTip = NSLocalizedString("device_code_tooltip", comment: "")
         menu.addItem(addDevice)
 
         if !accounts.isEmpty {
             let labelsItem = NSMenuItem(title: NSLocalizedString("display_labels", comment: ""), action: nil, keyEquivalent: "")
+            labelsItem.image = styledMenuIcon("tag", description: labelsItem.title)
             let labelsMenu = NSMenu()
             for account in accounts {
                 let item = NSMenuItem(title: String(format: NSLocalizedString("set_label", comment: ""), displayLabel(for: account), account.email), action: #selector(setAccountLabel(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = account.email
+                item.image = styledMenuIcon("pencil", description: item.title)
                 labelsMenu.addItem(item)
             }
             labelsItem.submenu = labelsMenu
             menu.addItem(labelsItem)
 
             let removeItem = NSMenuItem(title: NSLocalizedString("remove_account", comment: ""), action: nil, keyEquivalent: "")
+            removeItem.image = styledMenuIcon("trash", description: removeItem.title)
             let removeMenu = NSMenu()
             for account in accounts {
                 let item = NSMenuItem(title: "\(displayLabel(for: account))  \(account.email)", action: #selector(removeAccount(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = account.key
                 item.isEnabled = !isSwitching && account.key != "single"
+                item.image = styledMenuIcon("minus.circle", description: item.title)
                 removeMenu.addItem(item)
             }
             removeItem.submenu = removeMenu
@@ -600,9 +671,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let refresh = NSMenuItem(title: NSLocalizedString("refresh", comment: ""), action: #selector(refreshNow), keyEquivalent: "r")
         refresh.target = self
         refresh.isEnabled = !isSwitching
+        refresh.image = styledMenuIcon("arrow.clockwise", description: refresh.title)
         menu.addItem(refresh)
 
         let quit = NSMenuItem(title: NSLocalizedString("quit", comment: ""), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.image = styledMenuIcon("power", description: quit.title)
         menu.addItem(quit)
 
         statusItem.menu = menu
@@ -610,14 +683,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Display Helpers
 
+    private func statusIdleTitle() -> String {
+        "Codex"
+    }
+
     private func statusTitle(for account: CodexAccount) -> String {
-        let base: String
-        switch usageMode {
-        case .fiveHour:
-            base = String(format: NSLocalizedString("status_5hr", comment: ""), displayLabel(for: account), remainingPercentText(fromUsed: account.fiveHourUsedPercent))
-        case .weekly:
-            base = String(format: NSLocalizedString("status_weekly", comment: ""), displayLabel(for: account), remainingPercentText(fromUsed: account.weeklyUsedPercent))
-        }
+        let base = String(
+            format: NSLocalizedString("status_5hr", comment: ""),
+            displayLabel(for: account),
+            remainingPercentText(fromUsed: account.fiveHourUsedPercent)
+        )
         if rotationEnabled, accounts.count == 2 {
             return String(format: NSLocalizedString("status_rotation", comment: ""), base)
         }
@@ -661,31 +736,194 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return "\(pctStr) (\(hour12):\(String(format: "%02d", minute)) \(suffix))"
     }
 
-    private func usageModeItem(title: String, percent: String, reset: String, mode: UsageDisplayMode) -> NSMenuItem {
-        let item = NSMenuItem(title: "", action: #selector(setUsageMode(_:)), keyEquivalent: "")
-        item.target = self
-        item.representedObject = mode.rawValue
-        item.state = usageMode == mode ? .on : .off
-        item.attributedTitle = usageAttributedTitle(title: title, percent: percent, reset: reset)
+    private func usageCombinedItem(for account: CodexAccount) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        let tooltip = usageDetailTooltip(
+            fiveHourPercent: remainingPercentText(fromUsed: account.fiveHourUsedPercent),
+            fiveHourReset: resetTimeText(from: account.fiveHourResetAt),
+            weeklyPercent: remainingPercentText(fromUsed: account.weeklyUsedPercent),
+            weeklyReset: resetTimeText(from: account.weeklyResetAt)
+        )
+        item.view = usageSummaryView(
+            fiveHourPercent: remainingPercentText(fromUsed: account.fiveHourUsedPercent),
+            fiveHourReset: resetTimeText(from: account.fiveHourResetAt),
+            weeklyPercent: remainingPercentText(fromUsed: account.weeklyUsedPercent),
+            weeklyReset: resetTimeText(from: account.weeklyResetAt)
+        )
+        item.toolTip = tooltip
+        item.isEnabled = false
         return item
     }
 
-    private func usageAttributedTitle(title: String, percent: String, reset: String) -> NSAttributedString {
-        attributedColumns(
-            "\(title)\t\(percent)\t\(reset)",
-            tabs: [112, 162],
+    private func activeSummaryItem(for account: CodexAccount) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        let tooltip = accountDetailTooltip(for: account)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: menuSummaryWidth, height: 52))
+
+        let icon = NSImageView(frame: NSRect(x: menuSideInset + 2, y: 16, width: 22, height: 22))
+        icon.image = styledMenuIcon("person.crop.circle.fill.badge.checkmark", description: displayLabel(for: account))
+        icon.contentTintColor = .controlAccentColor
+        view.addSubview(icon)
+
+        let planWidth: CGFloat = 58
+        let textX = menuSideInset + 34
+        let titleWidth = menuSummaryWidth - textX - planWidth - menuSideInset - 8
+        let title = menuLabel(
+            displayLabel(for: account),
+            font: .systemFont(ofSize: 14, weight: .semibold),
+            color: .labelColor,
+            frame: NSRect(x: textX, y: 28, width: titleWidth, height: 17)
+        )
+        view.addSubview(title)
+
+        let subtitle = menuLabel(
+            accountUsageSummaryText(for: account),
+            font: .systemFont(ofSize: 11, weight: .regular),
+            color: .secondaryLabelColor,
+            frame: NSRect(x: textX, y: 11, width: menuSummaryWidth - textX - menuSideInset, height: 15)
+        )
+        view.addSubview(subtitle)
+
+        let planLabel = menuLabel(
+            displayPlan(account.plan),
+            font: .systemFont(ofSize: 10, weight: .medium),
+            color: .controlAccentColor,
+            frame: NSRect(x: menuSummaryWidth - menuSideInset - planWidth, y: 29, width: planWidth, height: 13),
+            alignment: .right
+        )
+        view.addSubview(planLabel)
+
+        applyTooltip(tooltip, to: view)
+
+        item.view = view
+        item.toolTip = tooltip
+        item.isEnabled = false
+        return item
+    }
+
+    private func usageSummaryView(fiveHourPercent: String, fiveHourReset: String, weeklyPercent: String, weeklyReset: String) -> NSView {
+        let tooltip = usageDetailTooltip(
+            fiveHourPercent: fiveHourPercent,
+            fiveHourReset: fiveHourReset,
+            weeklyPercent: weeklyPercent,
+            weeklyReset: weeklyReset
+        )
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: menuSummaryWidth, height: 30))
+        let gap: CGFloat = 8
+        let columnWidth = (menuSummaryWidth - (menuSideInset * 2) - gap) / 2
+
+        let fiveHour = usageValueColumn(
+            title: NSLocalizedString("5hr", comment: ""),
+            value: fiveHourPercent,
+            accent: .systemTeal
+        )
+        fiveHour.frame.origin = NSPoint(x: menuSideInset, y: 5)
+        fiveHour.frame.size.width = columnWidth
+        view.addSubview(fiveHour)
+
+        let weekly = usageValueColumn(
+            title: NSLocalizedString("weekly", comment: ""),
+            value: weeklyPercent,
+            accent: .systemIndigo
+        )
+        weekly.frame.origin = NSPoint(x: menuSideInset + columnWidth + gap, y: 5)
+        weekly.frame.size.width = columnWidth
+        view.addSubview(weekly)
+
+        applyTooltip(tooltip, to: view)
+        return view
+    }
+
+    private func usageValueColumn(title: String, value: String, accent: NSColor) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 136, height: 20))
+        let titleLabel = menuLabel(
+            title,
+            font: .systemFont(ofSize: 10, weight: .medium),
+            color: .secondaryLabelColor,
+            frame: NSRect(x: 0, y: 9, width: 48, height: 12)
+        )
+        view.addSubview(titleLabel)
+
+        let valueLabel = menuLabel(
+            value,
+            font: .monospacedDigitSystemFont(ofSize: 13, weight: .semibold),
+            color: accent,
+            frame: NSRect(x: 54, y: 2, width: 74, height: 16),
+            alignment: .right
+        )
+        view.addSubview(valueLabel)
+
+        return view
+    }
+
+    private func usageDetailTooltip(fiveHourPercent: String, fiveHourReset: String, weeklyPercent: String, weeklyReset: String) -> String {
+        [
+            usageTooltipLine(title: NSLocalizedString("5hr", comment: ""), percent: fiveHourPercent, reset: fiveHourReset),
+            usageTooltipLine(title: NSLocalizedString("weekly", comment: ""), percent: weeklyPercent, reset: weeklyReset)
+        ].joined(separator: "\n")
+    }
+
+    private func usageTooltipLine(title: String, percent: String, reset: String) -> String {
+        guard !reset.isEmpty else {
+            return "\(title) \(percent)"
+        }
+        return "\(title) \(percent) · \(String(format: NSLocalizedString("reset_at", comment: ""), reset))"
+    }
+
+    private func accountDetailTooltip(for account: CodexAccount) -> String {
+        let detail = usageDetailTooltip(
+            fiveHourPercent: remainingPercentText(fromUsed: account.fiveHourUsedPercent),
+            fiveHourReset: resetTimeText(from: account.fiveHourResetAt),
+            weeklyPercent: remainingPercentText(fromUsed: account.weeklyUsedPercent),
+            weeklyReset: resetTimeText(from: account.weeklyResetAt)
+        )
+        return "\(displayLabel(for: account)) · \(displayPlan(account.plan))\n\(detail)"
+    }
+
+    private func applyTooltip(_ tooltip: String, to view: NSView) {
+        view.toolTip = tooltip
+        for subview in view.subviews {
+            applyTooltip(tooltip, to: subview)
+        }
+    }
+
+    private func menuLabel(_ text: String, font: NSFont, color: NSColor, frame: NSRect, alignment: NSTextAlignment = .left) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.frame = frame
+        field.font = font
+        field.textColor = color
+        field.alignment = alignment
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        field.cell?.usesSingleLineMode = true
+        field.cell?.truncatesLastVisibleLine = true
+        return field
+    }
+
+    private func usageAttributedTitle(fiveHourPercent: String, fiveHourReset: String, weeklyPercent: String, weeklyReset: String) -> NSAttributedString {
+        let fiveHour = "\(NSLocalizedString("5hr", comment: "")) \(fiveHourPercent) \(fiveHourReset)"
+        let weekly = "\(NSLocalizedString("weekly", comment: "")) \(weeklyPercent) \(weeklyReset)"
+        return attributedColumns(
+            "\(fiveHour)\t\(weekly)",
+            tabs: [168],
             font: NSFont.menuFont(ofSize: 0),
             color: .labelColor
         )
     }
 
-    private func accountAttributedTitle(label: String, email: String) -> NSAttributedString {
-        attributedColumns(
-            "\(limitedLabel(label))\t\(email)",
-            tabs: [86],
+    private func accountAttributedTitle(for account: CodexAccount) -> NSAttributedString {
+        let fiveHour = "\(NSLocalizedString("5hr", comment: "")) \(remainingPercentText(fromUsed: account.fiveHourUsedPercent))"
+        let weekly = "\(NSLocalizedString("weekly", comment: "")) \(remainingPercentText(fromUsed: account.weeklyUsedPercent))"
+        return attributedColumns(
+            "\(limitedLabel(displayLabel(for: account)))\t\(fiveHour)\t\(weekly)",
+            tabs: [92, 184],
             font: NSFont.menuFont(ofSize: 0),
             color: .labelColor
         )
+    }
+
+    private func accountUsageSummaryText(for account: CodexAccount) -> String {
+        "\(NSLocalizedString("5hr", comment: "")) \(remainingPercentText(fromUsed: account.fiveHourUsedPercent)) · \(NSLocalizedString("weekly", comment: "")) \(remainingPercentText(fromUsed: account.weeklyUsedPercent))"
     }
 
     private func attributedColumns(_ text: String, tabs: [CGFloat], font: NSFont, color: NSColor) -> NSAttributedString {
@@ -702,10 +940,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func headerItem(_ title: String) -> NSMenuItem {
+    private func headerItem(_ title: String, symbol: String? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
+        if let symbol {
+            item.image = styledMenuIcon(symbol, description: title)
+        }
         return item
+    }
+
+    private func scopeToggleItem(title: String, action: Selector, state: Bool, enabled: Bool, symbol: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.state = state ? .on : .off
+        item.isEnabled = enabled
+        item.image = styledMenuIcon(symbol, description: title)
+        return item
+    }
+
+    private func styledMenuIcon(_ systemName: String, description: String?) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: systemName, accessibilityDescription: description) else {
+            return nil
+        }
+        let configured = base.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)) ?? base
+        configured.isTemplate = true
+        return configured
     }
 
     // MARK: Action Handlers
@@ -713,13 +972,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func refreshNow() {
         lastUsageFetch = nil
         refreshAccounts()
-    }
-
-    @objc private func setUsageMode(_ sender: NSMenuItem) {
-        guard let rawValue = sender.representedObject as? String,
-              let mode = UsageDisplayMode(rawValue: rawValue) else { return }
-        usageMode = mode
-        rebuildMenu()
     }
 
     @objc private func toggleRotation() {
@@ -732,6 +984,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let current = rotationThreshold
         guard let idx = steps.firstIndex(of: current) else { return }
         rotationThreshold = steps[(idx + 1) % steps.count]
+        rebuildMenu()
+    }
+
+    @objc private func toggleScopeCLI() {
+        SwitchScopeDefaults.setApplyToCLI(!SwitchScopeDefaults.current().applyToCLI)
+        rebuildMenu()
+    }
+
+    @objc private func toggleScopeApp() {
+        SwitchScopeDefaults.setReflectCodexApp(!SwitchScopeDefaults.current().reflectCodexApp)
+        rebuildMenu()
+    }
+
+    @objc private func toggleScopeLaunch() {
+        SwitchScopeDefaults.setLaunchCodexIfClosed(!SwitchScopeDefaults.current().launchCodexIfClosed)
         rebuildMenu()
     }
 
@@ -847,7 +1114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let home = NSHomeDirectory()
+            let home = codexHomeDirectory()
             let mainAuthPath = "\(home)/.codex/auth.json"
             var errorMsg: String?
 
@@ -903,6 +1170,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func switchTo(key: String) {
         guard !isSwitching else { return }
         guard let target = accounts.first(where: { $0.key == key }), !target.isActive else { return }
+        let scope = SwitchScopeDefaults.current()
+        guard scope.applyToCLI else {
+            showAlert(title: NSLocalizedString("alert_switch_scope_disabled", comment: ""), message: NSLocalizedString("alert_switch_scope_disabled_msg", comment: ""))
+            return
+        }
         isSwitching = true
         beginSwitchAnimation(label: displayLabel(for: target))
         rebuildMenu()
@@ -918,7 +1190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            let home = NSHomeDirectory()
+            let home = codexHomeDirectory()
             let targetAuthPath = "\(home)/.codex/accounts/\(key).auth.json"
             let mainAuthPath = "\(home)/.codex/auth.json"
 
@@ -963,7 +1235,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             let registryError = self.updateRegistryActiveKey(decodeBase64Key(key))
 
-            let restartResult = self.restartCodexApp()
+            let restartResult = scope.reflectCodexApp
+                ? self.restartCodexApp(launchIfNotRunning: scope.launchCodexIfClosed)
+                : CommandResult(status: 0, output: "Codex App reflection skipped.")
             DispatchQueue.main.async {
                 self.isSwitching = false
                 self.endSwitchAnimation()
@@ -1005,7 +1279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Account File Operations
 
     private func syncActiveAuthSnapshot() -> String? {
-        let home = NSHomeDirectory()
+        let home = codexHomeDirectory()
         let registryURL = URL(fileURLWithPath: "\(home)/.codex/accounts/registry.json")
         let activeAuthURL = URL(fileURLWithPath: "\(home)/.codex/auth.json")
 
@@ -1041,7 +1315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @discardableResult
     private func updateRegistryActiveKey(_ key: String?) -> String? {
-        let home = NSHomeDirectory()
+        let home = codexHomeDirectory()
         let accountsDir = "\(home)/.codex/accounts"
         let registryURL = URL(fileURLWithPath: "\(accountsDir)/registry.json")
         try? FileManager.default.createDirectory(atPath: accountsDir, withIntermediateDirectories: true)
@@ -1070,7 +1344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: API - Read Account Files
 
     private func readAccountFiles() -> (accounts: [AccountInfo], activeKey: String?) {
-        let home = NSHomeDirectory()
+        let home = codexHomeDirectory()
         let accountsDir = "\(home)/.codex/accounts"
         let fm = FileManager.default
 
@@ -1212,7 +1486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             auth["tokens"] = tokens
         }
 
-        let home = NSHomeDirectory()
+        let home = codexHomeDirectory()
         guard let data = try? JSONSerialization.data(withJSONObject: auth, options: .prettyPrinted) else { return }
         let filePath = info.key == "single"
             ? "\(home)/.codex/auth.json"
@@ -1397,7 +1671,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             let saved = self.saveNewAccount(tokens: tokens)
-            let _ = self.restartCodexApp()
+            let _ = self.restartCodexApp(launchIfNotRunning: true)
 
             DispatchQueue.main.async {
                 self.isSwitching = false
@@ -1547,7 +1821,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             let saved = self.saveNewAccount(tokens: tokens)
-            let _ = self.restartCodexApp()
+            let _ = self.restartCodexApp(launchIfNotRunning: true)
 
             DispatchQueue.main.async {
                 self.isSwitching = false
@@ -1603,7 +1877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ]
         let auth = normalizeAuth(rawAuth)
 
-        let home = NSHomeDirectory()
+        let home = codexHomeDirectory()
         let accountsDir = "\(home)/.codex/accounts"
         let mainAuthPath = "\(home)/.codex/auth.json"
         let registryPath = "\(accountsDir)/registry.json"
@@ -1666,7 +1940,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Process Management
 
-    private func restartCodexApp() -> CommandResult { cliRestartCodex() }
+    private func restartCodexApp(launchIfNotRunning: Bool) -> CommandResult {
+        cliRestartCodex(launchIfNotRunning: launchIfNotRunning)
+    }
 
     // MARK: Utility
 
@@ -1728,6 +2004,8 @@ private func runCLI() -> Never {
     switch command {
     case "rotation":
         handleRotation(args.dropFirst())
+    case "scope":
+        handleScope(args.dropFirst())
     case "list":
         handleList()
     case "active":
@@ -1749,6 +2027,10 @@ private func cliUsage() -> Never {
           "  active                        Show active account\n" +
           "  switch <key|email>            Switch to account\n" +
           "  usage                         Show usage for active account\n" +
+          "  scope status                  Show switch scope\n" +
+          "  scope cli on|off              Apply switch to CLI next run\n" +
+          "  scope app on|off              Reflect switch in Codex App immediately\n" +
+          "  scope launch on|off           Launch Codex App if closed during reflection\n" +
           "  rotation status               Show rotation state\n" +
           "  rotation on|off               Toggle rotation\n" +
           "  rotation threshold <60|70|80|90>  Set threshold\n", stderr)
@@ -1790,6 +2072,48 @@ private func handleRotation(_ args: ArraySlice<String>) -> Never {
 
     default:
         fputs("Usage: CodexAccountSwitcher rotation <status|on|off|threshold [60|70|80|90]>\n", stderr)
+        exit(1)
+    }
+}
+
+private func handleScope(_ args: ArraySlice<String>) -> Never {
+    let subcommand = args.first
+
+    switch subcommand {
+    case "status":
+        let scope = SwitchScopeDefaults.current()
+        print("cli:\(scope.applyToCLI ? "on" : "off") app:\(scope.reflectCodexApp ? "on" : "off") launch:\(scope.launchCodexIfClosed ? "on" : "off")")
+        exit(0)
+
+    case "cli":
+        guard let value = args.dropFirst().first, ["on", "off"].contains(value) else {
+            fputs("Usage: CodexAccountSwitcher scope cli <on|off>\n", stderr)
+            exit(1)
+        }
+        SwitchScopeDefaults.setApplyToCLI(value == "on")
+        print("cli:\(value)")
+        exit(0)
+
+    case "app":
+        guard let value = args.dropFirst().first, ["on", "off"].contains(value) else {
+            fputs("Usage: CodexAccountSwitcher scope app <on|off>\n", stderr)
+            exit(1)
+        }
+        SwitchScopeDefaults.setReflectCodexApp(value == "on")
+        print("app:\(value)")
+        exit(0)
+
+    case "launch":
+        guard let value = args.dropFirst().first, ["on", "off"].contains(value) else {
+            fputs("Usage: CodexAccountSwitcher scope launch <on|off>\n", stderr)
+            exit(1)
+        }
+        SwitchScopeDefaults.setLaunchCodexIfClosed(value == "on")
+        print("launch:\(value)")
+        exit(0)
+
+    default:
+        fputs("Usage: CodexAccountSwitcher scope <status|cli|app|launch> [on|off]\n", stderr)
         exit(1)
     }
 }
@@ -1863,6 +2187,11 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         fputs("Error: switch requires an account key or email\n", stderr)
         exit(1)
     }
+    let scope = SwitchScopeDefaults.current()
+    guard scope.applyToCLI else {
+        fputs("Error: CLI next-run apply is off; no shared auth file will be changed.\n", stderr)
+        exit(1)
+    }
 
     let accounts = cliReadAccounts()
     let match = accounts.first { $0.key == target || $0.email == target }
@@ -1885,7 +2214,7 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         exit(1)
     }
 
-    let home = NSHomeDirectory()
+    let home = codexHomeDirectory()
     let targetAuthPath = "\(home)/.codex/accounts/\(match.key).auth.json"
     let mainAuthPath = "\(home)/.codex/auth.json"
 
@@ -1930,10 +2259,12 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         fputs("Warning: registry update failed — \(regError)\n", stderr)
     }
 
-    // 5. Restart Codex
-    let result = cliRestartCodex()
-    if result.status != 0 {
-        fputs("Warning: Codex restart issue — \(result.output)\n", stderr)
+    // 5. Reflect in Codex App if enabled
+    if scope.reflectCodexApp {
+        let result = cliRestartCodex(launchIfNotRunning: scope.launchCodexIfClosed)
+        if result.status != 0 {
+            fputs("Warning: Codex restart issue — \(result.output)\n", stderr)
+        }
     }
 
     print("switched:\(match.email)")

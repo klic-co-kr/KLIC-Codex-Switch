@@ -9,10 +9,17 @@
 "5hr" = "5hr";
 "weekly" = "Weekly";
 "no_accounts" = "No accounts available";
-"accounts" = "Accounts:";
+"accounts" = "Accounts";
+"switch_scope" = "Switch scope";
+"scope_cli_on" = "CLI next run: On";
+"scope_cli_off" = "CLI next run: Off";
+"scope_app_on" = "Codex app: On";
+"scope_app_off" = "Codex app: Off";
+"scope_launch_on" = "Launch if closed: On";
+"scope_launch_off" = "Launch if closed: Off";
 
 /* Status Bar */
-"status_5hr" = "%@ · 5hr %@";
+"status_5hr" = "%@ · 5hr %@ left";
 "status_weekly" = "%@ · W %@";
 "remaining_5hr" = "5h %@ left";
 "remaining_weekly" = "W %@ left";
@@ -47,6 +54,8 @@
 "alert_relaunch_failed" = "Codex relaunch failed";
 "alert_device_login_failed" = "Device-code login failed";
 "alert_maintenance_failed" = "%@ failed";
+"alert_switch_scope_disabled" = "No switch target enabled";
+"alert_switch_scope_disabled_msg" = "CLI next-run apply is off. Codex App uses the same auth file, so enable CLI next run before switching.";
 
 /* Maintenance */
 "adding_account" = "Adding account";
@@ -68,6 +77,7 @@
 "am" = "AM";
 "pm" = "PM";
 "time_format" = "%@:%@ %@";
+"reset_at" = "resets %@";
 
 /* Date */
 "date_format" = "%@ %@";

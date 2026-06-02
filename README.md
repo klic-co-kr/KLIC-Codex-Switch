@@ -78,6 +78,16 @@ open "build/Codex Account Switcher Installer.app"
 2. 전환할 계정 클릭
 3. Codex 앱이 자동으로 재시작되며 새 계정으로 연결됩니다
 
+### 전환 적용 범위 설정하기
+
+메뉴의 **전환 적용 범위**에서 계정 전환이 어디까지 반영될지 선택할 수 있습니다.
+
+| 옵션 | 설명 |
+|------|------|
+| CLI 다음 실행 적용 | `~/.codex/auth.json`을 바꿔 다음 `codex` 실행부터 새 계정을 사용합니다 |
+| Codex 앱 즉시 반영 | Codex 앱이 실행 중이면 재시작해서 새 계정을 즉시 반영합니다 |
+| 앱이 꺼져 있으면 실행 | Codex 앱이 꺼져 있을 때도 전환 후 앱을 자동 실행합니다 |
+
 ### 계정 이름 변경하기
 
 메뉴에서 계정 이름을 **"회사"**, **"개인"**, **"🚀"** 등으로 바꿀 수 있습니다.
@@ -110,6 +120,12 @@ open "build/Codex Account Switcher Installer.app"
 
 # 자동 전환 설정
 ./run.sh -- rotation <on|off>
+
+# 전환 적용 범위
+./run.sh -- scope status
+./run.sh -- scope cli <on|off>
+./run.sh -- scope app <on|off>
+./run.sh -- scope launch <on|off>
 ```
 
 ---
