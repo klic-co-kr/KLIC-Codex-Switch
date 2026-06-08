@@ -11,12 +11,18 @@ cd "$root"
 
 grep -q 'private func statusIdleTitle() -> String' Sources/main.swift \
   || fail "status item should have a non-empty fallback title"
-grep -q 'button.title = statusIdleTitle()' Sources/main.swift \
-  || fail "status item should show fallback text before accounts load"
-perl -0ne 'exit(/else \{\s*if !isSwitching \{\s*statusItem\.button\?\.title = statusIdleTitle\(\)/s ? 0 : 1)' Sources/main.swift \
-  || fail "status item should remain visible when no active account is loaded"
-grep -q 'Bundle.main.url(forResource: "AppIcon", withExtension: "icns")' Sources/main.swift \
-  || fail "status item should prefer the bundled app icon"
+grep -q 'button.image = loadStatusBarIcon()' Sources/main.swift \
+  || fail "status item should use an image icon"
+grep -q 'private func makeKlicSwitcherStatusIcon() -> NSImage' Sources/main.swift \
+  || fail "status item should draw an original KLIC switcher icon"
+! grep -q '/Applications/Codex.app/Contents/Resources/codexTemplate' Sources/main.swift \
+  || fail "status item should not reuse Codex app template resources"
+grep -q 'image.isTemplate = true' Sources/main.swift \
+  || fail "status icon should be a template image for menu bar contrast"
+! grep -q 'Look for the \\"Codex\\" item' Resources/en.lproj/Localizable.strings \
+  || fail "first-launch hint should not tell users to look for a Codex menu bar item"
+! grep -q '메뉴바에서 \\"Codex\\"' Resources/ko.lproj/Localizable.strings \
+  || fail "Korean first-launch hint should not tell users to look for a Codex menu bar item"
 perl -0ne 'exit(/statusTitle\(for account: CodexAccount\).*status_5hr.*displayLabel\(for: account\).*fiveHourUsedPercent/s ? 0 : 1)' Sources/main.swift \
   || fail "active status title should show the active account label plus 5-hour usage"
 ! grep -q '"KLIC"' Sources/main.swift \

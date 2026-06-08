@@ -358,7 +358,7 @@ private func cliCodexPIDs() -> [String] {
 // MARK: - AppDelegate
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private var statusItem: NSStatusItem!
     private let refreshInterval: TimeInterval = 5
     private let usageCacheInterval: TimeInterval = 60
     private let labelsDefaultsKey = "accountDisplayLabels"
@@ -392,6 +392,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.isVisible = true
         configureStatusButton()
         refreshAccounts()
         let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
@@ -399,36 +401,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         RunLoop.current.add(timer, forMode: .common)
         refreshTimer = timer
+        showFirstLaunchHintIfNeeded()
+    }
+
+    private func showFirstLaunchHintIfNeeded() {
+        let key = "didShowMenuBarHint"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("hint_title", comment: "")
+        alert.informativeText = NSLocalizedString("hint_body", comment: "")
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("ok", comment: ""))
+        alert.runModal()
     }
 
     // MARK: UI Configuration
 
     private func configureStatusButton() {
         guard let button = statusItem.button else { return }
-        button.title = statusIdleTitle()
+        button.title = ""
         button.toolTip = NSLocalizedString("app_name", comment: "")
         button.image = loadStatusBarIcon()
-        button.imagePosition = .imageLeft
+        button.imagePosition = .imageOnly
     }
 
     private func loadStatusBarIcon() -> NSImage? {
-        if let bundledIcon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-           let image = NSImage(contentsOf: bundledIcon) {
-            image.size = NSSize(width: 18, height: 18)
-            return image
-        }
+        makeKlicSwitcherStatusIcon()
+    }
 
-        let candidates = [
-            "/Applications/Codex.app/Contents/Resources/icon.icns",
-            "/Applications/Codex.app/Contents/Resources/codexTemplate@2x.png",
-            "/Applications/Codex.app/Contents/Resources/codexTemplate.png"
-        ]
+    private func makeKlicSwitcherStatusIcon() -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size)
 
-        guard let path = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }),
-              let image = NSImage(contentsOfFile: path) else {
-            return styledMenuIcon("arrow.left.arrow.right.circle", description: NSLocalizedString("app_name", comment: ""))
-        }
-        image.size = NSSize(width: 18, height: 18)
+        image.lockFocus()
+        NSColor.black.setStroke()
+        NSColor.black.setFill()
+
+        let mark = NSBezierPath()
+        mark.lineWidth = 2.25
+        mark.lineCapStyle = .round
+        mark.lineJoinStyle = .round
+        mark.move(to: NSPoint(x: 4.5, y: 3.5))
+        mark.line(to: NSPoint(x: 4.5, y: 14.5))
+        mark.move(to: NSPoint(x: 5.3, y: 9.0))
+        mark.line(to: NSPoint(x: 12.6, y: 4.2))
+        mark.move(to: NSPoint(x: 5.3, y: 9.0))
+        mark.line(to: NSPoint(x: 12.6, y: 13.8))
+        mark.stroke()
+
+        NSBezierPath(ovalIn: NSRect(x: 11.9, y: 2.9, width: 3.1, height: 3.1)).fill()
+        NSBezierPath(ovalIn: NSRect(x: 11.9, y: 12.0, width: 3.1, height: 3.1)).fill()
+
+        image.unlockFocus()
+        image.size = size
+        image.isTemplate = true
+        image.accessibilityDescription = NSLocalizedString("app_name", comment: "")
         return image
     }
 
@@ -527,14 +556,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
 
         if let active = accounts.first(where: { $0.isActive }) {
-            if !isSwitching {
-                statusItem.button?.title = statusTitle(for: active)
-            }
             menu.addItem(activeSummaryItem(for: active))
         } else {
-            if !isSwitching {
-                statusItem.button?.title = statusIdleTitle()
-            }
             menu.addItem(headerItem(lastError ?? NSLocalizedString("no_active_account", comment: ""), symbol: "exclamationmark.circle"))
         }
 
@@ -1110,7 +1133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func removeAccountDirect(_ key: String) {
         guard !isSwitching else { return }
         isSwitching = true
-        statusItem.button?.title = NSLocalizedString("removing_account", comment: "")
+        statusItem.button?.toolTip = NSLocalizedString("removing_account", comment: "")
         rebuildMenu()
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1268,7 +1291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateSwitchAnimationTitle() {
         let frame = switchAnimationFrames[switchAnimationFrame % switchAnimationFrames.count]
-        statusItem.button?.title = "\(switchingTitle) \(frame)"
+        statusItem.button?.toolTip = "\(switchingTitle) \(frame)"
     }
 
     private func endSwitchAnimation() {
@@ -1636,7 +1659,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func performBrowserLogin() {
         guard !isSwitching else { return }
         isSwitching = true
-        statusItem.button?.title = NSLocalizedString("adding_account", comment: "")
+        statusItem.button?.toolTip = NSLocalizedString("adding_account", comment: "")
         rebuildMenu()
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1746,7 +1769,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func performDeviceCodeLogin() {
         guard !isSwitching else { return }
         isSwitching = true
-        statusItem.button?.title = NSLocalizedString("adding_account", comment: "")
+        statusItem.button?.toolTip = NSLocalizedString("adding_account", comment: "")
         rebuildMenu()
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1772,7 +1795,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.sync {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(userCode, forType: .string)
-                self.statusItem.button?.title = "\(userCode)"
+                self.statusItem.button?.toolTip = userCode
                 _ = cliRun("/usr/bin/open", [verifyURL])
             }
 

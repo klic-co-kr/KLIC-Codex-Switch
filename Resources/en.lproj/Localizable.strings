@@ -34,6 +34,11 @@
 "remove_account" = "Remove Account";
 "refresh" = "Refresh";
 "quit" = "Quit Account Switcher";
+"ok" = "OK";
+
+/* First-launch hint */
+"hint_title" = "Codex Account Switcher is running";
+"hint_body" = "There is no Dock icon or window. Look for the KLIC switch icon in the menu bar at the top-right of your screen, then click it to switch accounts.";
 
 /* Labels */
 "set_label" = "Set %@ (%@)...";
