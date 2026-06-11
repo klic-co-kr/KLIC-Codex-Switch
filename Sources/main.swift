@@ -362,6 +362,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let refreshInterval: TimeInterval = 5
     private let usageCacheInterval: TimeInterval = 60
     private let labelsDefaultsKey = "accountDisplayLabels"
+    private let statusItemLength: CGFloat = 18
+    private let statusItemAutosaveName = "local.codex-account-switcher.menu-bar.status-item"
+    private let statusItemPreferredPosition = 247
     private let menuSummaryWidth: CGFloat = 300
     private let menuSideInset: CGFloat = 14
     private var refreshTimer: Timer?
@@ -392,7 +395,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        prepareStatusItemPlacementDefaults()
+        statusItem = NSStatusBar.system.statusItem(withLength: statusItemLength)
+        statusItem.autosaveName = statusItemAutosaveName
         statusItem.isVisible = true
         configureStatusButton()
         refreshAccounts()
@@ -402,6 +407,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RunLoop.current.add(timer, forMode: .common)
         refreshTimer = timer
         showFirstLaunchHintIfNeeded()
+    }
+
+    private func prepareStatusItemPlacementDefaults() {
+        let defaults = UserDefaults.standard
+        defaults.set(statusItemPreferredPosition, forKey: "NSStatusItem Preferred Position \(statusItemAutosaveName)")
+        defaults.set(true, forKey: "NSStatusItem Visible \(statusItemAutosaveName)")
+        defaults.synchronize()
     }
 
     private func showFirstLaunchHintIfNeeded() {
@@ -422,7 +434,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureStatusButton() {
         guard let button = statusItem.button else { return }
         button.title = ""
-        button.toolTip = NSLocalizedString("app_name", comment: "")
+        button.toolTip = statusIdleTitle()
         button.image = loadStatusBarIcon()
         button.imagePosition = .imageOnly
     }
@@ -556,8 +568,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
 
         if let active = accounts.first(where: { $0.isActive }) {
+            if !isSwitching {
+                statusItem.button?.toolTip = statusTitle(for: active)
+            }
             menu.addItem(activeSummaryItem(for: active))
         } else {
+            if !isSwitching {
+                statusItem.button?.toolTip = statusIdleTitle()
+            }
             menu.addItem(headerItem(lastError ?? NSLocalizedString("no_active_account", comment: ""), symbol: "exclamationmark.circle"))
         }
 
