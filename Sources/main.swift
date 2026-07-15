@@ -146,7 +146,8 @@ enum RotationDecision: String {
 /// data never triggers a switch or a false all-exhausted warning.
 func windowOverLimit(usedPercent: Int?, remainingThreshold: Int) -> Bool {
     guard let used = usedPercent else { return false }
-    return (100 - used) <= remainingThreshold
+    let clamped = min(max(used, 0), 100)
+    return (100 - clamped) <= remainingThreshold
 }
 
 func accountOverLimit(fiveHourUsed: Int?, weeklyUsed: Int?, threshold5h: Int, thresholdWeekly: Int) -> Bool {
@@ -157,6 +158,85 @@ func accountOverLimit(fiveHourUsed: Int?, weeklyUsed: Int?, threshold5h: Int, th
 func decideRotation(activeOverLimit: Bool, inactiveOverLimit: Bool) -> RotationDecision {
     guard activeOverLimit else { return .none }
     return inactiveOverLimit ? .allExhausted : .switchTarget
+}
+
+// MARK: - Usage Window Classification (shared GUI + CLI)
+
+/// Windows are classified by their own duration, never by their position in the
+/// response. The Codex usage API's `primary_window`/`secondary_window` slots do
+/// NOT map to fixed durations: as of 2026-07 the 5-hour window was removed and
+/// the weekly window (limit_window_seconds == 604800) is delivered in
+/// `primary_window`, with `secondary_window` null. A window whose duration is at
+/// or below one day is treated as the short ("5-hour") window; anything longer is
+/// the weekly window. When 5-hour limits return, both windows classify correctly
+/// regardless of which slot each arrives in.
+private let fiveHourWindowMaxSeconds: Double = 86_400
+
+private let usageISO8601Formatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+}()
+
+private func usageWindowResetDate(_ dict: [String: Any]) -> Date? {
+    for key in ["reset_at", "resets_at"] {
+        if let ts = dict[key] as? Double {
+            return Date(timeIntervalSince1970: ts > 1e12 ? ts / 1000.0 : ts)
+        }
+        if let ts = dict[key] as? Int {
+            let d = Double(ts)
+            return Date(timeIntervalSince1970: d > 1e12 ? d / 1000.0 : d)
+        }
+        if let str = dict[key] as? String {
+            return usageISO8601Formatter.date(from: str)
+        }
+    }
+    return nil
+}
+
+private func usageWindowUsedPercent(_ dict: [String: Any]) -> Int? {
+    if let pct = dict["used_percent"] as? Double { return Int(pct) }
+    if let pct = dict["utilization"] as? Double { return Int(pct) }
+    return nil
+}
+
+private func usageWindowDurationSeconds(_ dict: [String: Any]) -> Double? {
+    if let s = dict["limit_window_seconds"] as? Double { return s }
+    if let s = dict["window_seconds"] as? Double { return s }
+    if let m = dict["window_minutes"] as? Double { return m * 60.0 }
+    return nil
+}
+
+private func classifyUsageWindows(_ rateLimit: [String: Any]?) -> (fiveHour: UsageWindow?, weekly: UsageWindow?) {
+    guard let rateLimit else { return (nil, nil) }
+    let slots: [([String: Any]?, Bool)] = [
+        (rateLimit["primary_window"] as? [String: Any] ?? rateLimit["primary"] as? [String: Any], true),
+        (rateLimit["secondary_window"] as? [String: Any] ?? rateLimit["secondary"] as? [String: Any], false)
+    ]
+
+    var fiveHour: UsageWindow?
+    var weekly: UsageWindow?
+    var undated: [(window: UsageWindow, isPrimary: Bool)] = []
+
+    for (dict, isPrimary) in slots {
+        guard let dict else { continue }
+        let window = UsageWindow(usedPercent: usageWindowUsedPercent(dict), resetDate: usageWindowResetDate(dict))
+        if let duration = usageWindowDurationSeconds(dict) {
+            if duration <= fiveHourWindowMaxSeconds { fiveHour = window } else { weekly = window }
+        } else {
+            undated.append((window, isPrimary))
+        }
+    }
+
+    // Windows lacking a duration field fall back to positional assignment
+    // (primary -> short, secondary -> weekly), filling only empty slots.
+    for (window, isPrimary) in undated {
+        if isPrimary && fiveHour == nil { fiveHour = window }
+        else if !isPrimary && weekly == nil { weekly = window }
+        else if weekly == nil { weekly = window }
+        else if fiveHour == nil { fiveHour = window }
+    }
+    return (fiveHour, weekly)
 }
 
 // MARK: - Shared Helpers (used by both GUI and CLI)
@@ -1105,6 +1185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleRotation() {
         rotationEnabled = !rotationEnabled
+        checkAutoRotation()
         rebuildMenu()
     }
 
@@ -1642,49 +1723,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         let plan = json["plan_type"] as? String ?? json["plan"] as? String
         let rateLimit = json["rate_limit"] as? [String: Any] ?? json["rate_limits"] as? [String: Any]
-        let primary = rateLimit?["primary_window"] as? [String: Any] ?? rateLimit?["primary"] as? [String: Any]
-        let secondary = rateLimit?["secondary_window"] as? [String: Any] ?? rateLimit?["secondary"] as? [String: Any]
+        let windows = classifyUsageWindows(rateLimit)
         return ParsedUsage(
             plan: plan,
-            fiveHour: primary.map { parseWindow($0) },
-            weekly: secondary.map { parseWindow($0) }
+            fiveHour: windows.fiveHour,
+            weekly: windows.weekly
         )
-    }
-
-    private func parseWindow(_ dict: [String: Any]) -> UsageWindow {
-        let usedPercent: Int?
-        if let pct = dict["used_percent"] as? Double {
-            usedPercent = Int(pct)
-        } else if let pct = dict["utilization"] as? Double {
-            usedPercent = Int(pct)
-        } else {
-            usedPercent = nil
-        }
-        let resetDate = parseResetDate(from: dict, keys: ["reset_at", "resets_at"])
-        return UsageWindow(usedPercent: usedPercent, resetDate: resetDate)
-    }
-
-    private static let iso8601Formatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-
-    private func parseResetDate(from dict: [String: Any], keys: [String]) -> Date? {
-        for key in keys {
-            if let ts = dict[key] as? Double {
-                let seconds = ts > 1e12 ? ts / 1000.0 : ts
-                return Date(timeIntervalSince1970: seconds)
-            }
-            if let ts = dict[key] as? Int {
-                let seconds = Double(ts) > 1e12 ? Double(ts) / 1000.0 : Double(ts)
-                return Date(timeIntervalSince1970: seconds)
-            }
-            if let str = dict[key] as? String {
-                return Self.iso8601Formatter.date(from: str)
-            }
-        }
-        return nil
     }
 
     // MARK: HTTP
@@ -2152,7 +2196,7 @@ private func runCLI() -> Never {
     case "switch":
         handleSwitch(args.dropFirst())
     case "usage":
-        handleUsage()
+        handleUsage(args.dropFirst())
     default:
         fputs("Error: unknown command '\(command)'\n\n", stderr)
         cliUsage()
@@ -2166,6 +2210,7 @@ private func cliUsage() -> Never {
           "  active                        Show active account\n" +
           "  switch <key|email>            Switch to account\n" +
           "  usage                         Show usage for active account\n" +
+          "  usage parse <json-file>       Classify a saved usage payload (debug)\n" +
           "  scope status                  Show switch scope\n" +
           "  scope cli on|off              Apply switch to CLI next run\n" +
           "  scope app on|off              Reflect switch in Codex App immediately\n" +
@@ -2226,9 +2271,9 @@ private func handleRotation(_ args: ArraySlice<String>) -> Never {
             exit(1)
         }
         func parsePercent(_ s: String) -> Int?? {
-            if s == "-" { return .some(nil) }          // known-unknown
-            guard let v = Int(s), (0...100).contains(v) else { return nil }  // invalid
-            return .some(v)
+            if s == "-" { return .some(Int?.none) }          // known-unknown
+            guard let v = Int(s), (0...100).contains(v) else { return Int??.none }  // invalid
+            return .some(Int?.some(v))
         }
         guard let a5 = parsePercent(rest[0]),
               let aWk = parsePercent(rest[1]),
@@ -2325,18 +2370,11 @@ private func handleList() -> Never {
 
                 let plan = json["plan_type"] as? String ?? json["plan"] as? String ?? ""
                 let rateLimit = json["rate_limit"] as? [String: Any] ?? json["rate_limits"] as? [String: Any]
-                let primary = rateLimit?["primary_window"] as? [String: Any] ?? rateLimit?["primary"] as? [String: Any]
-                let secondary = rateLimit?["secondary_window"] as? [String: Any] ?? rateLimit?["secondary"] as? [String: Any]
+                let windows = classifyUsageWindows(rateLimit)
 
                 if !plan.isEmpty { parts.append("plan:\(plan)") }
-                if let p = primary {
-                    let pct = p["used_percent"] as? Double ?? p["utilization"] as? Double
-                    if let pct { parts.append("5h:\(Int(pct))%") }
-                }
-                if let s = secondary {
-                    let pct = s["used_percent"] as? Double ?? s["utilization"] as? Double
-                    if let pct { parts.append("weekly:\(Int(pct))%") }
-                }
+                if let pct = windows.fiveHour?.usedPercent { parts.append("5h:\(pct)%") }
+                if let pct = windows.weekly?.usedPercent { parts.append("weekly:\(pct)%") }
                 break
             }
         }
@@ -2445,7 +2483,25 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
     exit(0)
 }
 
-private func handleUsage() -> Never {
+private func handleUsage(_ args: ArraySlice<String>) -> Never {
+    // Offline classification of a saved usage JSON payload — used by tests and
+    // debugging so the duration-based window mapping can be exercised without
+    // hitting the live API.
+    if args.first == "parse" {
+        guard let path = args.dropFirst().first,
+              let data = FileManager.default.contents(atPath: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            fputs("Usage: CodexAccountSwitcher usage parse <json-file>\n", stderr)
+            exit(1)
+        }
+        let rateLimit = json["rate_limit"] as? [String: Any] ?? json["rate_limits"] as? [String: Any]
+        let windows = classifyUsageWindows(rateLimit)
+        let fiveHour = windows.fiveHour?.usedPercent.map(String.init) ?? "-"
+        let weekly = windows.weekly?.usedPercent.map(String.init) ?? "-"
+        print("5h:\(fiveHour) weekly:\(weekly)")
+        exit(0)
+    }
+
     let accounts = cliReadAccounts()
     guard let active = accounts.first(where: { $0.isActive }) else {
         fputs("Error: no active account\n", stderr)
@@ -2479,18 +2535,11 @@ private func handleUsage() -> Never {
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let plan = json["plan_type"] as? String ?? json["plan"] as? String ?? "unknown"
             let rateLimit = json["rate_limit"] as? [String: Any] ?? json["rate_limits"] as? [String: Any]
-            let primary = rateLimit?["primary_window"] as? [String: Any] ?? rateLimit?["primary"] as? [String: Any]
-            let secondary = rateLimit?["secondary_window"] as? [String: Any] ?? rateLimit?["secondary"] as? [String: Any]
+            let windows = classifyUsageWindows(rateLimit)
 
             var parts = ["plan:\(plan)"]
-            if let p = primary {
-                let pct = p["used_percent"] as? Double ?? p["utilization"] as? Double
-                if let pct { parts.append("5h:\(Int(pct))%") }
-            }
-            if let s = secondary {
-                let pct = s["used_percent"] as? Double ?? s["utilization"] as? Double
-                if let pct { parts.append("weekly:\(Int(pct))%") }
-            }
+            if let pct = windows.fiveHour?.usedPercent { parts.append("5h:\(pct)%") }
+            if let pct = windows.weekly?.usedPercent { parts.append("weekly:\(pct)%") }
             print(parts.joined(separator: " "))
             exit(0)
         }
