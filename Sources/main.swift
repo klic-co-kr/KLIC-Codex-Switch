@@ -106,6 +106,59 @@ private enum FetchResult {
     case failed
 }
 
+// MARK: - Rotation Decision (pure, shared by GUI + CLI)
+
+/// Suite-aware defaults so CLI subcommands can be driven against an isolated
+/// store in tests via CODEX_SWITCHER_DEFAULTS_SUITE. In the GUI (no env var)
+/// this resolves to `.standard`.
+func switcherDefaults() -> UserDefaults {
+    if let suiteName = ProcessInfo.processInfo.environment["CODEX_SWITCHER_DEFAULTS_SUITE"],
+       let suite = UserDefaults(suiteName: suiteName) {
+        return suite
+    }
+    return .standard
+}
+
+enum RotationThresholdDefaults {
+    static let steps = [10, 20, 30, 40]
+    static let fallback = 20
+    static let key5h = "rotationThreshold5h"
+    static let keyWeekly = "rotationThresholdWeekly"
+
+    static func value(forKey key: String) -> Int {
+        let v = switcherDefaults().integer(forKey: key)
+        return v > 0 ? v : fallback
+    }
+
+    static func set(_ value: Int, forKey key: String) {
+        switcherDefaults().set(value, forKey: key)
+    }
+}
+
+enum RotationDecision: String {
+    case none
+    case switchTarget = "switch"
+    case allExhausted = "all-exhausted"
+}
+
+/// A usage window is "over limit" when its remaining (100 - used) is at or below
+/// the remaining-% threshold. Unknown (nil) usage counts as NOT over, so missing
+/// data never triggers a switch or a false all-exhausted warning.
+func windowOverLimit(usedPercent: Int?, remainingThreshold: Int) -> Bool {
+    guard let used = usedPercent else { return false }
+    return (100 - used) <= remainingThreshold
+}
+
+func accountOverLimit(fiveHourUsed: Int?, weeklyUsed: Int?, threshold5h: Int, thresholdWeekly: Int) -> Bool {
+    windowOverLimit(usedPercent: fiveHourUsed, remainingThreshold: threshold5h) ||
+        windowOverLimit(usedPercent: weeklyUsed, remainingThreshold: thresholdWeekly)
+}
+
+func decideRotation(activeOverLimit: Bool, inactiveOverLimit: Bool) -> RotationDecision {
+    guard activeOverLimit else { return .none }
+    return inactiveOverLimit ? .allExhausted : .switchTarget
+}
+
 // MARK: - Shared Helpers (used by both GUI and CLI)
 
 private struct HTTPResult {
@@ -379,16 +432,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let switchAnimationFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     private var cachedUsageByAccount: [String: ParsedUsage] = [:]
     private var lastUsageFetch: Date?
+    private var allLimitsReached = false
     private var rotationEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "rotationEnabled") }
-        set { UserDefaults.standard.set(newValue, forKey: "rotationEnabled") }
+        get { switcherDefaults().bool(forKey: "rotationEnabled") }
+        set { switcherDefaults().set(newValue, forKey: "rotationEnabled") }
     }
-    private var rotationThreshold: Int {
-        get {
-            let val = UserDefaults.standard.integer(forKey: "rotationThreshold")
-            return val > 0 ? val : 80
-        }
-        set { UserDefaults.standard.set(newValue, forKey: "rotationThreshold") }
+    private var rotationThreshold5h: Int {
+        get { RotationThresholdDefaults.value(forKey: RotationThresholdDefaults.key5h) }
+        set { RotationThresholdDefaults.set(newValue, forKey: RotationThresholdDefaults.key5h) }
+    }
+    private var rotationThresholdWeekly: Int {
+        get { RotationThresholdDefaults.value(forKey: RotationThresholdDefaults.keyWeekly) }
+        set { RotationThresholdDefaults.set(newValue, forKey: RotationThresholdDefaults.keyWeekly) }
     }
 
     // MARK: Lifecycle
@@ -550,16 +605,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func checkAutoRotation() {
+        let wasReached = allLimitsReached
         guard rotationEnabled,
               accounts.count == 2,
               !isSwitching,
               let active = accounts.first(where: { $0.isActive }),
-              let inactive = accounts.first(where: { !$0.isActive }),
-              let activePct = active.fiveHourUsedPercent,
-              let inactivePct = inactive.fiveHourUsedPercent,
-              activePct >= rotationThreshold,
-              inactivePct < rotationThreshold else { return }
-        switchTo(key: inactive.key)
+              let inactive = accounts.first(where: { !$0.isActive }) else {
+            allLimitsReached = false
+            if wasReached { rebuildMenu() }
+            return
+        }
+
+        let activeOver = accountOverLimit(
+            fiveHourUsed: active.fiveHourUsedPercent,
+            weeklyUsed: active.weeklyUsedPercent,
+            threshold5h: rotationThreshold5h,
+            thresholdWeekly: rotationThresholdWeekly)
+        let inactiveOver = accountOverLimit(
+            fiveHourUsed: inactive.fiveHourUsedPercent,
+            weeklyUsed: inactive.weeklyUsedPercent,
+            threshold5h: rotationThreshold5h,
+            thresholdWeekly: rotationThresholdWeekly)
+
+        switch decideRotation(activeOverLimit: activeOver, inactiveOverLimit: inactiveOver) {
+        case .switchTarget:
+            allLimitsReached = false
+            switchTo(key: inactive.key)
+        case .allExhausted:
+            allLimitsReached = true
+            if !wasReached { rebuildMenu() }
+        case .none:
+            allLimitsReached = false
+            if wasReached { rebuildMenu() }
+        }
     }
 
     // MARK: Menu Building
@@ -584,6 +662,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let active = accounts.first(where: { $0.isActive }) {
             menu.addItem(headerItem(NSLocalizedString("usage_remaining", comment: ""), symbol: "gauge.medium"))
             menu.addItem(usageCombinedItem(for: active))
+            if allLimitsReached {
+                menu.addItem(headerItem(NSLocalizedString("all_limits_reached", comment: ""), symbol: "exclamationmark.triangle.fill"))
+            }
             menu.addItem(.separator())
         }
 
@@ -599,12 +680,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rotItem.image = styledMenuIcon(rotationEnabled ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath", description: rotTitle)
             menu.addItem(rotItem)
 
-            let threshStr = String(format: NSLocalizedString("threshold", comment: ""), "\(rotationThreshold)")
-            let threshItem = NSMenuItem(title: threshStr, action: #selector(cycleThreshold), keyEquivalent: "")
-            threshItem.target = self
-            threshItem.isEnabled = rotationEnabled && !isSwitching
-            threshItem.image = styledMenuIcon("slider.horizontal.3", description: threshStr)
-            menu.addItem(threshItem)
+            let thresh5hStr = String(format: NSLocalizedString("threshold_5h", comment: ""), "\(rotationThreshold5h)")
+            let thresh5hItem = NSMenuItem(title: thresh5hStr, action: #selector(cycleThreshold5h), keyEquivalent: "")
+            thresh5hItem.target = self
+            thresh5hItem.isEnabled = rotationEnabled && !isSwitching
+            thresh5hItem.image = styledMenuIcon("slider.horizontal.3", description: thresh5hStr)
+            menu.addItem(thresh5hItem)
+
+            let threshWeeklyStr = String(format: NSLocalizedString("threshold_weekly", comment: ""), "\(rotationThresholdWeekly)")
+            let threshWeeklyItem = NSMenuItem(title: threshWeeklyStr, action: #selector(cycleThresholdWeekly), keyEquivalent: "")
+            threshWeeklyItem.target = self
+            threshWeeklyItem.isEnabled = rotationEnabled && !isSwitching
+            threshWeeklyItem.image = styledMenuIcon("slider.horizontal.3", description: threshWeeklyStr)
+            menu.addItem(threshWeeklyItem)
 
             menu.addItem(.separator())
         }
@@ -1020,12 +1108,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
-    @objc private func cycleThreshold() {
-        let steps = [60, 70, 80, 90]
-        let current = rotationThreshold
-        guard let idx = steps.firstIndex(of: current) else { return }
-        rotationThreshold = steps[(idx + 1) % steps.count]
+    @objc private func cycleThreshold5h() {
+        rotationThreshold5h = nextThresholdStep(after: rotationThreshold5h)
+        checkAutoRotation()
         rebuildMenu()
+    }
+
+    @objc private func cycleThresholdWeekly() {
+        rotationThresholdWeekly = nextThresholdStep(after: rotationThresholdWeekly)
+        checkAutoRotation()
+        rebuildMenu()
+    }
+
+    private func nextThresholdStep(after current: Int) -> Int {
+        let steps = RotationThresholdDefaults.steps
+        guard let idx = steps.firstIndex(of: current) else { return RotationThresholdDefaults.fallback }
+        return steps[(idx + 1) % steps.count]
     }
 
     @objc private func toggleScopeCLI() {
@@ -2074,20 +2172,35 @@ private func cliUsage() -> Never {
           "  scope launch on|off           Launch Codex App if closed during reflection\n" +
           "  rotation status               Show rotation state\n" +
           "  rotation on|off               Toggle rotation\n" +
-          "  rotation threshold <60|70|80|90>  Set threshold\n", stderr)
+          "  rotation threshold5h <10|20|30|40>      Set 5-hour switch threshold (remaining %)\n" +
+          "  rotation thresholdWeekly <10|20|30|40>  Set weekly switch threshold (remaining %)\n" +
+          "  rotation decide <a5> <aWk> <i5> <iWk>   Evaluate fallback (used %, '-' unknown)\n", stderr)
     exit(1)
 }
 
 private func handleRotation(_ args: ArraySlice<String>) -> Never {
-    let defaults = UserDefaults.standard
+    let defaults = switcherDefaults()
     let subcommand = args.first
+    let rotationUsage = "Usage: CodexAccountSwitcher rotation <status|on|off|threshold5h|thresholdWeekly|decide>\n"
+
+    func setThreshold(key: String, label: String) -> Never {
+        guard let valueStr = args.dropFirst().first,
+              let value = Int(valueStr),
+              RotationThresholdDefaults.steps.contains(value) else {
+            fputs("Error: \(label) must be one of: 10, 20, 30, 40\n", stderr)
+            exit(1)
+        }
+        RotationThresholdDefaults.set(value, forKey: key)
+        print("\(label):\(value)")
+        exit(0)
+    }
 
     switch subcommand {
     case "status":
         let enabled = defaults.bool(forKey: "rotationEnabled")
-        let threshold = defaults.integer(forKey: "rotationThreshold")
-        let thresh = threshold > 0 ? threshold : 80
-        print("rotation:\(enabled ? "on" : "off") threshold:\(thresh)")
+        let thr5h = RotationThresholdDefaults.value(forKey: RotationThresholdDefaults.key5h)
+        let thrWeekly = RotationThresholdDefaults.value(forKey: RotationThresholdDefaults.keyWeekly)
+        print("rotation:\(enabled ? "on" : "off") thr5h:\(thr5h) thrWeekly:\(thrWeekly)")
         exit(0)
 
     case "on":
@@ -2100,19 +2213,39 @@ private func handleRotation(_ args: ArraySlice<String>) -> Never {
         print("rotation:off")
         exit(0)
 
-    case "threshold":
-        guard let valueStr = args.dropFirst().first,
-              let value = Int(valueStr),
-              [60, 70, 80, 90].contains(value) else {
-            fputs("Error: threshold must be one of: 60, 70, 80, 90\n", stderr)
+    case "threshold5h":
+        setThreshold(key: RotationThresholdDefaults.key5h, label: "thr5h")
+
+    case "thresholdWeekly":
+        setThreshold(key: RotationThresholdDefaults.keyWeekly, label: "thrWeekly")
+
+    case "decide":
+        let rest = Array(args.dropFirst())
+        guard rest.count == 4 else {
+            fputs("Usage: CodexAccountSwitcher rotation decide <active5h> <activeWeekly> <inactive5h> <inactiveWeekly>\n", stderr)
             exit(1)
         }
-        defaults.set(value, forKey: "rotationThreshold")
-        print("threshold:\(value)")
+        func parsePercent(_ s: String) -> Int?? {
+            if s == "-" { return .some(nil) }          // known-unknown
+            guard let v = Int(s), (0...100).contains(v) else { return nil }  // invalid
+            return .some(v)
+        }
+        guard let a5 = parsePercent(rest[0]),
+              let aWk = parsePercent(rest[1]),
+              let i5 = parsePercent(rest[2]),
+              let iWk = parsePercent(rest[3]) else {
+            fputs("Error: percentages must be 0-100 or '-'\n", stderr)
+            exit(1)
+        }
+        let thr5h = RotationThresholdDefaults.value(forKey: RotationThresholdDefaults.key5h)
+        let thrWeekly = RotationThresholdDefaults.value(forKey: RotationThresholdDefaults.keyWeekly)
+        let activeOver = accountOverLimit(fiveHourUsed: a5, weeklyUsed: aWk, threshold5h: thr5h, thresholdWeekly: thrWeekly)
+        let inactiveOver = accountOverLimit(fiveHourUsed: i5, weeklyUsed: iWk, threshold5h: thr5h, thresholdWeekly: thrWeekly)
+        print(decideRotation(activeOverLimit: activeOver, inactiveOverLimit: inactiveOver).rawValue)
         exit(0)
 
     default:
-        fputs("Usage: CodexAccountSwitcher rotation <status|on|off|threshold [60|70|80|90]>\n", stderr)
+        fputs(rotationUsage, stderr)
         exit(1)
     }
 }

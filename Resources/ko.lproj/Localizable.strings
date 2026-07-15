@@ -93,7 +93,9 @@
 /* Rotation */
 "rotation_on" = "자동 전환: 켜짐";
 "rotation_off" = "자동 전환: 끔";
-"threshold" = "임계치: %@%%";
+"threshold_5h" = "5시간 전환 ≤ %@%%";
+"threshold_weekly" = "주간 전환 ≤ %@%%";
+"all_limits_reached" = "모든 계정 한도 임박";
 "status_rotation" = "%@ ⟳";
 
 /* Months */

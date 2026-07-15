@@ -93,7 +93,9 @@
 /* Rotation */
 "rotation_on" = "Auto-rotation: ON";
 "rotation_off" = "Auto-rotation: OFF";
-"threshold" = "Threshold: %@%%";
+"threshold_5h" = "5h switch ≤ %@%%";
+"threshold_weekly" = "Weekly switch ≤ %@%%";
+"all_limits_reached" = "All accounts near limit";
 "status_rotation" = "%@ ⟳";
 
 /* Months */
