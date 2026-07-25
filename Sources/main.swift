@@ -3,6 +3,8 @@ import CryptoKit
 import Foundation
 import WebKit
 
+private let codexBundleIdentifier = "com.openai.codex"
+
 private extension Data {
     var base64URLEncoded: String {
         base64EncodedString()
@@ -472,20 +474,26 @@ private func cliRestartCodex(launchIfNotRunning: Bool = true) -> CommandResult {
     if !wasRunning && !launchIfNotRunning {
         return CommandResult(status: 0, output: "Codex App was not running; launch skipped.")
     }
-    let openResult = cliRun("/usr/bin/open", ["-a", "Codex"])
+    let openResult = cliRun("/usr/bin/open", ["-b", codexBundleIdentifier])
     if openResult.status != 0 { return openResult }
-    Thread.sleep(forTimeInterval: 4)
-    let runningResult = cliRun("/usr/bin/osascript", ["-e", "application \"Codex\" is running"])
-    if runningResult.output.trimmingCharacters(in: .whitespacesAndNewlines) != "true" {
+    if !cliWaitForCodexApp() {
         return CommandResult(status: 1, output: "Codex App did not report as running after launch.")
     }
     return CommandResult(status: 0, output: "ok")
 }
 
 private func cliCodexPIDs() -> [String] {
-    let result = cliRun("/usr/bin/pgrep", ["-f", "/Applications/Codex\\.app/Contents/"])
-    guard result.status == 0 else { return [] }
-    return result.output.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
+    NSRunningApplication.runningApplications(withBundleIdentifier: codexBundleIdentifier)
+        .map { String($0.processIdentifier) }
+}
+
+private func cliWaitForCodexApp(timeout: TimeInterval = 10) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+        if !cliCodexPIDs().isEmpty { return true }
+        Thread.sleep(forTimeInterval: 0.25)
+    } while Date() < deadline
+    return !cliCodexPIDs().isEmpty
 }
 
 // MARK: - AppDelegate
