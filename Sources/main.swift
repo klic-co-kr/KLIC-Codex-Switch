@@ -1875,7 +1875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func waitForOAuthCallback(port: UInt16, expectedState: String, codeVerifier: String) -> String? {
+    private func waitForOAuthCallback(port: UInt16, expectedState: String, codeVerifier: String, timeout: TimeInterval = 300) -> String? {
         // Start server first, then open browser
         let sock = socket(AF_INET, SOCK_STREAM, 0)
         guard sock >= 0 else { return nil }
@@ -1883,8 +1883,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         var opt: Int32 = 1
         setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, socklen_t(MemoryLayout.size(ofValue: opt)))
-        var tv = timeval(tv_sec: 300, tv_usec: 0)
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout.size(ofValue: tv)))
+        // accept() on a Darwin listening socket ignores SO_RCVTIMEO, so a
+        // blocking accept would park this thread forever when no callback
+        // ever arrives — leaving isSwitching stuck and every account switch
+        // silently dead. Poll a non-blocking listener against a deadline.
+        let currentFlags = fcntl(sock, F_GETFL)
+        guard currentFlags >= 0, fcntl(sock, F_SETFL, currentFlags | O_NONBLOCK) == 0 else { return nil }
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -1903,8 +1907,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let authURL = "\(oauthIssuer)/oauth/authorize?response_type=code&client_id=\(oauthClientID)&redirect_uri=http%3A%2F%2Flocalhost%3A\(port)%2Fauth%2Fcallback&scope=\(scope)&code_challenge=\(challengeStr)&code_challenge_method=S256&state=\(expectedState)"
         _ = cliRun("/usr/bin/open", [authURL])
 
-        let client = accept(sock, nil, nil)
+        let deadline = Date().addingTimeInterval(timeout)
+        var client: Int32 = -1
+        while Date() < deadline {
+            client = accept(sock, nil, nil)
+            if client >= 0 { break }
+            guard errno == EAGAIN || errno == EWOULDBLOCK else { return nil }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
         guard client >= 0 else { return nil }
+        // Accepted sockets do not inherit O_NONBLOCK; give the request read
+        // its own deadline so a silent connection cannot stall login either.
+        var recvTimeout = timeval(tv_sec: Int(timeout), tv_usec: 0)
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, socklen_t(MemoryLayout.size(ofValue: recvTimeout)))
         defer { close(client) }
 
         var buf = [UInt8](repeating: 0, count: 8192)
