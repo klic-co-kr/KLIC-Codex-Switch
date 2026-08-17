@@ -108,6 +108,147 @@ private enum FetchResult {
     case failed
 }
 
+// MARK: - Session Continuity Models
+
+private struct FileFingerprint: Codable, Sendable {
+	let relativePath: String
+	let kind: FileKind
+	let size: UInt64
+	let modifiedAt: Date?
+	let sha256: String?
+
+	enum FileKind: String, Codable {
+		case file
+		case directory
+	}
+
+	init(relativePath: String, kind: FileKind, size: UInt64, modifiedAt: Date?, sha256: String?) {
+		self.relativePath = relativePath
+		self.kind = kind
+		self.size = size
+		self.modifiedAt = modifiedAt
+		self.sha256 = sha256
+	}
+}
+
+private struct SessionSnapshot: Codable, Sendable {
+	let codexHome: String
+	let createdAt: Date
+	let entries: [String: FileFingerprint]
+	let activeAccountKey: String?
+
+	init(codexHome: String, createdAt: Date = Date(), entries: [String: FileFingerprint], activeAccountKey: String? = nil) {
+		self.codexHome = codexHome
+		self.createdAt = createdAt
+		self.entries = entries
+		self.activeAccountKey = activeAccountKey
+	}
+}
+
+private struct SnapshotComparison: Codable, Sendable {
+	let deleted: [String]
+	let modified: [String]
+	let added: [String]
+	let unchangedCount: Int
+
+	var hasDestructiveChange: Bool { !deleted.isEmpty }
+	var isUnchanged: Bool { deleted.isEmpty && modified.isEmpty && added.isEmpty }
+
+	init(deleted: [String] = [], modified: [String] = [], added: [String] = [], unchangedCount: Int = 0) {
+		self.deleted = deleted
+		self.modified = modified
+		self.added = added
+		self.unchangedCount = unchangedCount
+	}
+}
+
+private struct SessionProtectionPolicy: Sendable {
+	let recursivelyHashedPaths: [String]
+	let singleHashedPaths: [String]
+	let existenceOnlyPaths: [String]
+
+	static let `default` = SessionProtectionPolicy(
+		recursivelyHashedPaths: ["sessions", "archived_sessions", "skills", "rules"],
+		singleHashedPaths: [
+			"history.jsonl", "session_index.jsonl", "config.toml",
+			"hooks.json", ".codex-global-state.json", "state_5.sqlite",
+			"thread_history_1.sqlite", "external_agent_session_imports.json"
+		],
+		existenceOnlyPaths: ["threads", "projects", "worktrees"]
+	)
+}
+
+private enum CaptureMode: Sendable {
+	case contentHashed
+	case metadataOnly
+}
+
+private struct ContinuityTestRecord: Codable, Sendable {
+	let marker: String
+	let startedAt: Date
+	let sourceAccount: String?
+	let targetAccount: String?
+	let sessionPath: String?
+	let sessionID: String?
+	let followUpSucceeded: Bool?
+	let verdict: ContinuityVerdict
+	let notes: String?
+
+	init(marker: String, startedAt: Date, sourceAccount: String?, targetAccount: String? = nil, sessionPath: String? = nil, sessionID: String? = nil, followUpSucceeded: Bool? = nil, verdict: ContinuityVerdict = .pending, notes: String? = nil) {
+		self.marker = marker
+		self.startedAt = startedAt
+		self.sourceAccount = sourceAccount
+		self.targetAccount = targetAccount
+		self.sessionPath = sessionPath
+		self.sessionID = sessionID
+		self.followUpSucceeded = followUpSucceeded
+		self.verdict = verdict
+		self.notes = notes
+	}
+}
+
+private enum ContinuityVerdict: String, Codable {
+	case pending
+	case pass
+	case partial
+	case fail
+
+	var displayText: String {
+		switch self {
+		case .pending: return NSLocalizedString("verdict_pending", comment: "")
+		case .pass: return NSLocalizedString("verdict_pass", comment: "")
+		case .partial: return NSLocalizedString("verdict_partial", comment: "")
+		case .fail: return NSLocalizedString("verdict_fail", comment: "")
+		}
+	}
+
+	// Records persisted before the raw values were stabilized stored Korean
+	// display strings; keep decoding them so old records still load.
+	init(from decoder: Decoder) throws {
+		let raw = try decoder.singleValueContainer().decode(String.self)
+		switch raw {
+		case "pending", "대기 중": self = .pending
+		case "pass", "통과": self = .pass
+		case "partial", "부분 통과": self = .partial
+		case "fail", "실패": self = .fail
+		default:
+			throw DecodingError.dataCorrupted(.init(
+				codingPath: decoder.codingPath,
+				debugDescription: "Unknown verdict: \(raw)"))
+		}
+	}
+}
+
+private struct SessionMarkerMatch: Sendable {
+	let fileURL: URL
+	let sessionID: String?
+
+	init(fileURL: URL, sessionID: String?) {
+		self.fileURL = fileURL
+		self.sessionID = sessionID
+	}
+}
+
 // MARK: - Rotation Decision (pure, shared by GUI + CLI)
 
 /// Suite-aware defaults so CLI subcommands can be driven against an isolated
@@ -496,6 +637,365 @@ private func cliWaitForCodexApp(timeout: TimeInterval = 10) -> Bool {
     return !cliCodexPIDs().isEmpty
 }
 
+// MARK: - Session Continuity Helpers
+
+private class SessionSnapshotter {
+    let codexHome: URL
+    let policy: SessionProtectionPolicy
+
+    init(codexHome: URL, policy: SessionProtectionPolicy = .default) {
+        self.codexHome = codexHome.resolvingSymlinksInPath().standardizedFileURL
+        self.policy = policy
+    }
+
+    func capture(mode: CaptureMode = .contentHashed) throws -> SessionSnapshot {
+        var entries: [String: FileFingerprint] = [:]
+
+        for path in policy.singleHashedPaths {
+            let url = codexHome.appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let item = try fingerprint(url: url, hashContents: mode == .contentHashed)
+                entries[item.relativePath] = item
+            }
+        }
+
+        for path in policy.recursivelyHashedPaths {
+            let root = codexHome.appendingPathComponent(path, isDirectory: true)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else { continue }
+            let rootItem = try fingerprint(url: root, hashContents: false)
+            entries[rootItem.relativePath] = rootItem
+
+            if isDirectory.boolValue {
+                guard let enumerator = FileManager.default.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                ) else { continue }
+
+                for case let itemURL as URL in enumerator {
+                    let values = try itemURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+                    guard values.isRegularFile == true else { continue }
+
+                    if shouldExclude(itemURL) {
+                        continue
+                    }
+
+                    let item = try fingerprint(url: itemURL, hashContents: mode == .contentHashed)
+                    entries[item.relativePath] = item
+                }
+            }
+        }
+
+        for path in policy.existenceOnlyPaths {
+            let url = codexHome.appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let item = try fingerprint(url: url, hashContents: false)
+                entries[item.relativePath] = item
+            }
+        }
+
+        let home = codexHome.path
+        var activeKey: String?
+        let registryURL = URL(fileURLWithPath: "\(home)/accounts/registry.json")
+        if let data = try? Data(contentsOf: registryURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let key = json["active_account_key"] as? String {
+            activeKey = key
+        }
+
+        return SessionSnapshot(codexHome: home, entries: entries, activeAccountKey: activeKey)
+    }
+
+    func compare(_ before: SessionSnapshot, _ after: SessionSnapshot) -> SnapshotComparison {
+        let beforeKeys = Set(before.entries.keys)
+        let afterKeys = Set(after.entries.keys)
+        let deleted = beforeKeys.subtracting(afterKeys).sorted()
+        let added = afterKeys.subtracting(beforeKeys).sorted()
+        var modified: [String] = []
+        var unchanged = 0
+
+        for key in beforeKeys.intersection(afterKeys).sorted() {
+            guard let old = before.entries[key], let new = after.entries[key] else { continue }
+            let contentChanged: Bool
+            if old.sha256 != nil || new.sha256 != nil {
+                contentChanged = old.sha256 != new.sha256
+            } else {
+                contentChanged = old.modifiedAt != new.modifiedAt
+            }
+            if old.kind != new.kind || old.size != new.size || contentChanged {
+                modified.append(key)
+            } else {
+                unchanged += 1
+            }
+        }
+
+        return SnapshotComparison(deleted: deleted, modified: modified, added: added, unchangedCount: unchanged)
+    }
+
+    private func fingerprint(url: URL, hashContents: Bool) throws -> FileFingerprint {
+        let values = try url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey])
+        let relativePath = relativePath(for: url)
+
+        if values.isDirectory == true {
+            return FileFingerprint(
+                relativePath: relativePath,
+                kind: .directory,
+                size: UInt64(values.fileSize ?? 0),
+                modifiedAt: values.contentModificationDate,
+                sha256: nil
+            )
+        }
+
+        return FileFingerprint(
+            relativePath: relativePath,
+            kind: .file,
+            size: UInt64(values.fileSize ?? 0),
+            modifiedAt: values.contentModificationDate,
+            sha256: hashContents ? try sha256(url: url) : nil
+        )
+    }
+
+    private func sha256(url: URL) throws -> String {
+        guard let stream = InputStream(url: url) else {
+            throw NSError(domain: "SessionSnapshotter", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cannot open file"])
+        }
+        stream.open()
+        // An unopened stream would hash zero bytes as a bogus "empty" digest
+        // and poison the baseline snapshot — fail loudly instead.
+        guard (stream as Stream).streamStatus == .open, stream.streamError == nil else {
+            let message = stream.streamError?.localizedDescription ?? "Cannot open file for hashing"
+            throw NSError(domain: "SessionSnapshotter", code: 3, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        defer { stream.close() }
+
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count < 0 {
+                throw NSError(domain: "SessionSnapshotter", code: 2, userInfo: [NSLocalizedDescriptionKey: "Read error"])
+            }
+            if count == 0 { break }
+            hasher.update(data: Data(buffer[0..<count]))
+        }
+
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func relativePath(for url: URL) -> String {
+        let url = url.resolvingSymlinksInPath().standardizedFileURL
+        let root = codexHome.path.hasSuffix("/") ? codexHome.path : codexHome.path + "/"
+        if url.path == codexHome.path { return "." }
+        guard url.path.hasPrefix(root) else { return url.lastPathComponent }
+        return String(url.path.dropFirst(root.count))
+    }
+
+    private func shouldExclude(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        return name.hasSuffix("-wal") || name.hasSuffix("-shm") || name.hasSuffix(".tmp") ||
+               name.hasSuffix(".lock") || name == "auth.json"
+    }
+}
+
+private class SessionMarkerFinder {
+    let codexHome: URL
+
+    init(codexHome: URL) {
+        self.codexHome = codexHome
+    }
+
+    func find(marker: String) throws -> SessionMarkerMatch? {
+        guard marker.hasPrefix("CAS-PROBE-"), let needle = marker.data(using: .utf8) else {
+            return nil
+        }
+
+        let candidates = [
+            codexHome.appendingPathComponent("sessions", isDirectory: true),
+            codexHome.appendingPathComponent("archived_sessions", isDirectory: true),
+            codexHome.appendingPathComponent("history.jsonl")
+        ]
+
+        for candidate in candidates {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory) else { continue }
+
+            if isDirectory.boolValue {
+                guard let enumerator = FileManager.default.enumerator(
+                    at: candidate,
+                    includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                ) else { continue }
+
+                for case let file as URL in enumerator {
+                    let values = try file.resourceValues(forKeys: [.isRegularFileKey])
+                    guard values.isRegularFile == true, ["json", "jsonl"].contains(file.pathExtension.lowercased()) else { continue }
+                    if try contains(needle: needle, in: file) {
+                        return SessionMarkerMatch(fileURL: file, sessionID: inferredSessionID(from: file))
+                    }
+                }
+            } else if try contains(needle: needle, in: candidate) {
+                return SessionMarkerMatch(fileURL: candidate, sessionID: inferredSessionID(from: candidate))
+            }
+        }
+
+        return nil
+    }
+
+    private func contains(needle: Data, in file: URL) throws -> Bool {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+
+        var overlap = Data()
+        while true {
+            let chunk = try handle.read(upToCount: 64 * 1024) ?? Data()
+            if chunk.isEmpty { return false }
+
+            var search = overlap
+            search.append(chunk)
+            if search.range(of: needle) != nil { return true }
+            overlap = Data(search.suffix(max(needle.count - 1, 0)))
+        }
+    }
+
+    private func inferredSessionID(from url: URL) -> String? {
+        let pattern = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+        if let range = url.lastPathComponent.range(of: pattern, options: .regularExpression) {
+            return String(url.lastPathComponent[range])
+        }
+        return nil
+    }
+}
+
+private class ContinuityTestStore {
+    let continuityRecordFile: URL
+
+    private let encoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .iso8601
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return e
+    }()
+
+    private let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
+
+    init() {
+        // Continuity records live beside the test-isolated codex home, not the
+        // real Application Support, so CLI tests can drive them end-to-end.
+        let dir = URL(fileURLWithPath: codexHomeDirectory()).appendingPathComponent(".codex/continuity", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        self.continuityRecordFile = dir.appendingPathComponent("continuity-test.json")
+    }
+
+    func begin(sourceAccount: String?) throws -> ContinuityTestRecord {
+        let marker = "CAS-PROBE-\(UUID().uuidString)"
+        let record = ContinuityTestRecord(marker: marker, startedAt: Date(), sourceAccount: sourceAccount)
+        try save(record)
+        return record
+    }
+
+    func recordMarkerMatch(_ match: SessionMarkerMatch) throws -> ContinuityTestRecord {
+        guard let record = try loadRecord() else { throw missingRecordError }
+        let updated = ContinuityTestRecord(
+            marker: record.marker,
+            startedAt: record.startedAt,
+            sourceAccount: record.sourceAccount,
+            targetAccount: record.targetAccount,
+            sessionPath: match.fileURL.path,
+            sessionID: match.sessionID,
+            followUpSucceeded: record.followUpSucceeded,
+            verdict: record.verdict,
+            notes: record.notes
+        )
+        try save(updated)
+        return updated
+    }
+
+    func finish(verdict: ContinuityVerdict, targetAccount: String?, followUpSucceeded: Bool?, notes: String?) throws -> ContinuityTestRecord {
+        guard let record = try loadRecord() else { throw missingRecordError }
+        let updated = ContinuityTestRecord(
+            marker: record.marker,
+            startedAt: record.startedAt,
+            sourceAccount: record.sourceAccount,
+            targetAccount: targetAccount ?? record.targetAccount,
+            sessionPath: record.sessionPath,
+            sessionID: record.sessionID,
+            followUpSucceeded: followUpSucceeded,
+            verdict: verdict,
+            notes: notes ?? record.notes
+        )
+        try save(updated)
+        return updated
+    }
+
+    func loadRecord() throws -> ContinuityTestRecord? {
+        guard FileManager.default.fileExists(atPath: continuityRecordFile.path) else { return nil }
+        let data = try Data(contentsOf: continuityRecordFile)
+        return try decoder.decode(ContinuityTestRecord.self, from: data)
+    }
+
+    private var missingRecordError: NSError {
+        NSError(domain: "ContinuityTestStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "No continuity test in progress"])
+    }
+
+    private func save(_ record: ContinuityTestRecord) throws {
+        let data = try encoder.encode(record)
+        try data.write(to: continuityRecordFile, options: .atomic)
+    }
+}
+
+private func makeSessionSnapshotter() -> SessionSnapshotter {
+    SessionSnapshotter(codexHome: URL(fileURLWithPath: codexHomeDirectory()).appendingPathComponent(".codex", isDirectory: true))
+}
+
+private func makeSessionMarkerFinder() -> SessionMarkerFinder {
+    SessionMarkerFinder(codexHome: URL(fileURLWithPath: codexHomeDirectory()).appendingPathComponent(".codex", isDirectory: true))
+}
+
+/// Restores ~/.codex/auth.json from the previous account's snapshot file.
+/// The source is read fully before anything is written and the final write is
+/// atomic, so a failure can never leave auth.json absent. Returns nil on
+/// success or an error message; the caller decides how to fix the registry.
+func restorePreviousAuth(previousEmail: String?) -> String? {
+    guard let previousEmail, previousEmail != "codex" else {
+        return "previous account unknown"
+    }
+    let home = codexHomeDirectory()
+    let encoded = encodeKey(previousEmail)
+    let previousAuthURL = URL(fileURLWithPath: "\(home)/.codex/accounts/\(encoded).auth.json")
+    let mainAuthURL = URL(fileURLWithPath: "\(home)/.codex/auth.json")
+    guard FileManager.default.fileExists(atPath: previousAuthURL.path) else {
+        return "account file missing for \(previousEmail)"
+    }
+    do {
+        let data = try Data(contentsOf: previousAuthURL)
+        try data.write(to: mainAuthURL, options: .atomic)
+        return nil
+    } catch {
+        return error.localizedDescription
+    }
+}
+
+// MARK: - Session Protection Defaults
+
+enum SessionProtectionDefaults {
+    private static let enabledKey = "sessionProtectionEnabled"
+
+    static var enabled: Bool {
+        get {
+            let defaults = switcherDefaults()
+            guard defaults.object(forKey: enabledKey) != nil else { return true }
+            return defaults.bool(forKey: enabledKey)
+        }
+        set { switcherDefaults().set(newValue, forKey: enabledKey) }
+    }
+}
+
 // MARK: - AppDelegate
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -521,6 +1021,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cachedUsageByAccount: [String: ParsedUsage] = [:]
     private var lastUsageFetch: Date?
     private var allLimitsReached = false
+    private var continuityTestRecord: ContinuityTestRecord?
+    private var isLocatingMarker = false
+    private var lastSnapshotComparison: SnapshotComparison?
+    private var sessionProtectionEnabled: Bool {
+        get { SessionProtectionDefaults.enabled }
+        set { SessionProtectionDefaults.enabled = newValue }
+    }
     private var rotationEnabled: Bool {
         get { switcherDefaults().bool(forKey: "rotationEnabled") }
         set { switcherDefaults().set(newValue, forKey: "rotationEnabled") }
@@ -549,6 +1056,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         RunLoop.current.add(timer, forMode: .common)
         refreshTimer = timer
+        continuityTestRecord = try? ContinuityTestStore().loadRecord()
         showFirstLaunchHintIfNeeded()
     }
 
@@ -808,6 +1316,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             enabled: !isSwitching && scope.reflectCodexApp,
             symbol: "play.circle"
         ))
+        menu.addItem(.separator())
+
+        // Session protection & continuity
+        menu.addItem(headerItem(NSLocalizedString("session_protection", comment: ""), symbol: "shield"))
+        menu.addItem(scopeToggleItem(
+            title: String(format: NSLocalizedString(sessionProtectionEnabled ? "session_protection_on" : "session_protection_off", comment: "")),
+            action: #selector(toggleSessionProtection),
+            state: sessionProtectionEnabled,
+            enabled: !isSwitching,
+            symbol: "shield.fill"
+        ))
+        if let comparison = lastSnapshotComparison {
+            let summary = String(
+                format: NSLocalizedString("snapshot_summary", comment: ""),
+                comparison.deleted.count, comparison.modified.count, comparison.unchangedCount)
+            let item = NSMenuItem(title: summary, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.image = styledMenuIcon("doc.on.doc", description: summary)
+            menu.addItem(item)
+        }
+        menu.addItem(continuityTestMenuItem())
         menu.addItem(.separator())
 
         if accounts.isEmpty {
@@ -1166,6 +1695,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
+    private func continuityTestMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: NSLocalizedString("continuity_test", comment: ""), action: nil, keyEquivalent: "")
+        item.image = styledMenuIcon("testtube.2", description: item.title)
+        let submenu = NSMenu()
+
+        if let record = continuityTestRecord {
+            let markerItem = NSMenuItem(title: record.marker, action: #selector(copyContinuityMarker), keyEquivalent: "")
+            markerItem.target = self
+            markerItem.image = styledMenuIcon("doc.on.doc", description: record.marker)
+            markerItem.toolTip = NSLocalizedString("marker_tooltip", comment: "")
+            submenu.addItem(markerItem)
+
+            let statusItem = NSMenuItem(
+                title: String(format: NSLocalizedString("continuity_status", comment: ""), record.verdict.displayText),
+                action: nil, keyEquivalent: "")
+            statusItem.isEnabled = false
+            statusItem.image = styledMenuIcon(verdictSymbol(record.verdict), description: statusItem.title)
+            submenu.addItem(statusItem)
+
+            submenu.addItem(.separator())
+            submenu.addItem(continuityActionItem("locate_marker", #selector(locateContinuityMarker), enabled: !isSwitching && !isLocatingMarker))
+            submenu.addItem(.separator())
+            submenu.addItem(continuityVerdictItem("mark_pass", .pass))
+            submenu.addItem(continuityVerdictItem("mark_partial", .partial))
+            submenu.addItem(continuityVerdictItem("mark_fail", .fail))
+            submenu.addItem(.separator())
+        }
+
+        // Always reachable so a finished test can be replaced with a new one.
+        let beginTitle = continuityTestRecord == nil
+            ? NSLocalizedString("begin_continuity_test", comment: "")
+            : NSLocalizedString("begin_continuity_test_new", comment: "")
+        let beginItem = NSMenuItem(title: beginTitle, action: #selector(beginContinuityTest), keyEquivalent: "")
+        beginItem.target = self
+        beginItem.isEnabled = !isSwitching
+        beginItem.image = styledMenuIcon("play.circle", description: beginItem.title)
+        submenu.addItem(beginItem)
+
+        item.submenu = submenu
+        return item
+    }
+
+    private func continuityActionItem(_ titleKey: String, _ action: Selector, enabled: Bool) -> NSMenuItem {
+        let item = NSMenuItem(title: NSLocalizedString(titleKey, comment: ""), action: action, keyEquivalent: "")
+        item.target = self
+        item.isEnabled = enabled
+        item.image = styledMenuIcon("magnifyingglass", description: item.title)
+        return item
+    }
+
+    private func continuityVerdictItem(_ titleKey: String, _ verdict: ContinuityVerdict) -> NSMenuItem {
+        let item = NSMenuItem(title: NSLocalizedString(titleKey, comment: ""), action: #selector(markContinuityVerdict(_:)), keyEquivalent: "")
+        item.target = self
+        item.isEnabled = !isSwitching
+        item.representedObject = verdict.rawValue
+        item.image = styledMenuIcon(verdictSymbol(verdict), description: item.title)
+        return item
+    }
+
+    private func verdictSymbol(_ verdict: ContinuityVerdict) -> String {
+        switch verdict {
+        case .pending: return "clock"
+        case .pass: return "checkmark.circle.fill"
+        case .partial: return "exclamationmark.triangle"
+        case .fail: return "xmark.circle"
+        }
+    }
+
     private func scopeToggleItem(title: String, action: Selector, state: Bool, enabled: Bool, symbol: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
@@ -1227,6 +1824,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleScopeLaunch() {
         SwitchScopeDefaults.setLaunchCodexIfClosed(!SwitchScopeDefaults.current().launchCodexIfClosed)
+        rebuildMenu()
+    }
+
+    // MARK: Session Protection Actions
+
+    @objc private func toggleSessionProtection() {
+        sessionProtectionEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func beginContinuityTest() {
+        guard !isSwitching else { return }
+        let store = ContinuityTestStore()
+        do {
+            let activeEmail = accounts.first(where: { $0.isActive })?.email
+            let record = try store.begin(sourceAccount: activeEmail)
+            continuityTestRecord = record
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(record.marker, forType: .string)
+            showAlert(
+                title: NSLocalizedString("continuity_started", comment: ""),
+                message: String(format: NSLocalizedString("continuity_started_msg", comment: ""), record.marker))
+        } catch {
+            showAlert(title: NSLocalizedString("alert_continuity_failed", comment: ""), message: error.localizedDescription)
+        }
+        rebuildMenu()
+    }
+
+    @objc private func copyContinuityMarker() {
+        guard let record = continuityTestRecord else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(record.marker, forType: .string)
+    }
+
+    @objc private func locateContinuityMarker() {
+        guard !isSwitching, !isLocatingMarker, let record = continuityTestRecord else { return }
+        // Scanning every session file can take seconds — keep it off the main
+        // thread so the menu bar never freezes while searching.
+        isLocatingMarker = true
+        rebuildMenu()
+        let marker = record.marker
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = Result { try makeSessionMarkerFinder().find(marker: marker) }
+            DispatchQueue.main.async {
+                self.isLocatingMarker = false
+                switch outcome {
+                case .success(.some(let match)):
+                    do {
+                        self.continuityTestRecord = try ContinuityTestStore().recordMarkerMatch(match)
+                        self.showAlert(
+                            title: NSLocalizedString("marker_found", comment: ""),
+                            message: String(format: NSLocalizedString("marker_found_msg", comment: ""), match.fileURL.lastPathComponent))
+                    } catch {
+                        self.showAlert(title: NSLocalizedString("alert_continuity_failed", comment: ""), message: error.localizedDescription)
+                    }
+                case .success(.none):
+                    self.showAlert(title: NSLocalizedString("marker_not_found", comment: ""), message: NSLocalizedString("marker_not_found_msg", comment: ""))
+                case .failure(let error):
+                    self.showAlert(title: NSLocalizedString("alert_continuity_failed", comment: ""), message: error.localizedDescription)
+                }
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    @objc private func markContinuityVerdict(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let verdict = ContinuityVerdict(rawValue: raw) else { return }
+        let store = ContinuityTestStore()
+        do {
+            let activeEmail = accounts.first(where: { $0.isActive })?.email
+            continuityTestRecord = try store.finish(
+                verdict: verdict,
+                targetAccount: activeEmail,
+                followUpSucceeded: nil,
+                notes: nil)
+        } catch {
+            showAlert(title: NSLocalizedString("alert_continuity_failed", comment: ""), message: error.localizedDescription)
+        }
         rebuildMenu()
     }
 
@@ -1404,6 +2080,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         isSwitching = true
+        let previousActiveEmail = accounts.first(where: { $0.isActive })?.email
         beginSwitchAnimation(label: displayLabel(for: target))
         rebuildMenu()
 
@@ -1421,6 +2098,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let home = codexHomeDirectory()
             let targetAuthPath = "\(home)/.codex/accounts/\(key).auth.json"
             let mainAuthPath = "\(home)/.codex/auth.json"
+
+            // Session protection state. Snapshot failures are fail-closed: the
+            // switch aborts rather than silently proceeding unprotected.
+            let protection = self.sessionProtectionEnabled
+            let snapshotter = makeSessionSnapshotter()
+
+            func abortSwitch(_ titleKey: String, _ message: String) {
+                DispatchQueue.main.async {
+                    self.isSwitching = false
+                    self.endSwitchAnimation()
+                    self.showAlert(title: NSLocalizedString(titleKey, comment: ""), message: message)
+                    self.refreshAccounts()
+                }
+            }
+
+            // Post-swap abort: auth.json already holds the target's tokens, so
+            // first restore it from the previous account file (synced by
+            // syncActiveAuthSnapshot above). If that restore fails, point the
+            // registry at the target instead — auth.json and registry stay
+            // consistent either way, and neither account's stored tokens are
+            // touched, so a retry can never overwrite them.
+            func abortPostSwap(_ titleKey: String, _ message: String, registryUpdated: Bool) {
+                if let restoreError = restorePreviousAuth(previousEmail: previousActiveEmail) {
+                    if !registryUpdated { _ = self.updateRegistryActiveKey(decodeBase64Key(key)) }
+                    abortSwitch(titleKey, String(format: NSLocalizedString("alert_restore_failed_msg", comment: ""), restoreError))
+                } else {
+                    if registryUpdated { _ = self.updateRegistryActiveKey(previousActiveEmail) }
+                    abortSwitch(titleKey, message)
+                }
+            }
+
+            // Session protection: baseline snapshot of protected files.
+            var beforeSnapshot: SessionSnapshot?
+            if protection {
+                do { beforeSnapshot = try snapshotter.capture(mode: .contentHashed) }
+                catch {
+                    abortSwitch("alert_snapshot_failed", NSLocalizedString("alert_snapshot_failed_msg", comment: ""))
+                    return
+                }
+            }
 
             // Refresh target account's token before switching
             if let targetData = try? Data(contentsOf: URL(fileURLWithPath: targetAuthPath)),
@@ -1444,6 +2161,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
+            // Quiescent baseline is captured immediately before the swap so the
+            // isolation window covers the swap alone — not the multi-second
+            // token refresh, during which the running Codex app legitimately
+            // appends to session files.
+            var quiescentBefore: SessionSnapshot?
+            if protection {
+                do { quiescentBefore = try snapshotter.capture(mode: .metadataOnly) }
+                catch {
+                    abortSwitch("alert_snapshot_failed", NSLocalizedString("alert_snapshot_failed_msg", comment: ""))
+                    return
+                }
+            }
+
             do {
                 let targetURL = URL(fileURLWithPath: targetAuthPath)
                 let mainURL = URL(fileURLWithPath: mainAuthPath)
@@ -1461,11 +2191,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
+            // Authentication-isolation check over the swap window only. The
+            // switcher writes nothing but auth.json (excluded from
+            // fingerprints), so any diff here is external interference.
+            if protection, let before = quiescentBefore {
+                let after: SessionSnapshot
+                do { after = try snapshotter.capture(mode: .metadataOnly) }
+                catch {
+                    abortPostSwap("alert_snapshot_failed", NSLocalizedString("alert_snapshot_failed_msg", comment: ""), registryUpdated: false)
+                    return
+                }
+                if !snapshotter.compare(before, after).isUnchanged {
+                    abortPostSwap(
+                        "alert_protected_files_changed",
+                        NSLocalizedString("alert_protected_files_changed_msg", comment: ""),
+                        registryUpdated: false)
+                    return
+                }
+            }
+
             let registryError = self.updateRegistryActiveKey(decodeBase64Key(key))
+
+            // Destructive-change check runs BEFORE the app restart. If it
+            // fires, auth.json is restored while the still-running app holds
+            // the previous account's credentials in memory — no second restart
+            // is needed and nothing is left inconsistent.
+            if protection, let before = beforeSnapshot {
+                let after: SessionSnapshot
+                do { after = try snapshotter.capture(mode: .contentHashed) }
+                catch {
+                    abortPostSwap("alert_snapshot_failed", NSLocalizedString("alert_snapshot_failed_msg", comment: ""), registryUpdated: true)
+                    return
+                }
+                let diff = snapshotter.compare(before, after)
+                if diff.hasDestructiveChange {
+                    abortPostSwap(
+                        "alert_session_files_missing",
+                        String(format: NSLocalizedString("alert_session_files_missing_msg", comment: ""), diff.deleted.joined(separator: "\n")),
+                        registryUpdated: true)
+                    return
+                }
+                DispatchQueue.main.async {
+                    self.lastSnapshotComparison = diff
+                }
+            }
 
             let restartResult = scope.reflectCodexApp
                 ? self.restartCodexApp(launchIfNotRunning: scope.launchCodexIfClosed)
                 : CommandResult(status: 0, output: "Codex App reflection skipped.")
+
             DispatchQueue.main.async {
                 self.isSwitching = false
                 self.endSwitchAnimation()
@@ -2220,6 +2994,8 @@ private func runCLI() -> Never {
         handleSwitch(args.dropFirst())
     case "usage":
         handleUsage(args.dropFirst())
+    case "session":
+        handleSession(args.dropFirst())
     default:
         fputs("Error: unknown command '\(command)'\n\n", stderr)
         cliUsage()
@@ -2242,8 +3018,108 @@ private func cliUsage() -> Never {
           "  rotation on|off               Toggle rotation\n" +
           "  rotation threshold5h <10|20|30|40>      Set 5-hour switch threshold (remaining %)\n" +
           "  rotation thresholdWeekly <10|20|30|40>  Set weekly switch threshold (remaining %)\n" +
-          "  rotation decide <a5> <aWk> <i5> <iWk>   Evaluate fallback (used %, '-' unknown)\n", stderr)
+          "  rotation decide <a5> <aWk> <i5> <iWk>   Evaluate fallback (used %, '-' unknown)\n" +
+          "  session protection [on|off]   Show or toggle session protection\n" +
+          "  session snapshot [metadata]   Capture a protected-file snapshot (debug)\n" +
+          "  session continuity begin      Start a continuity test (prints marker)\n" +
+          "  session continuity locate     Locate the marker in session files\n" +
+          "  session continuity finish <pass|partial|fail>  Record a verdict\n", stderr)
     exit(1)
+}
+
+private func handleSession(_ args: ArraySlice<String>) -> Never {
+    let subcommand = args.first
+
+    switch subcommand {
+    case "protection":
+        let rest = args.dropFirst()
+        if let value = rest.first {
+            guard ["on", "off"].contains(value) else {
+                fputs("Usage: CodexAccountSwitcher session protection <on|off>\n", stderr)
+                exit(1)
+            }
+            SessionProtectionDefaults.enabled = (value == "on")
+            print("protection:\(value)")
+            exit(0)
+        }
+        print("protection:\(SessionProtectionDefaults.enabled ? "on" : "off")")
+        exit(0)
+
+    case "snapshot":
+        let mode: CaptureMode = args.dropFirst().first == "metadata" ? .metadataOnly : .contentHashed
+        do {
+            let snapshot = try makeSessionSnapshotter().capture(mode: mode)
+            print("entries:\(snapshot.entries.count) active:\(snapshot.activeAccountKey ?? "-") createdAt:\(snapshot.createdAt)")
+            exit(0)
+        } catch {
+            fputs("Error: snapshot failed — \(error.localizedDescription)\n", stderr)
+            exit(1)
+        }
+
+    case "continuity":
+        handleContinuity(args.dropFirst())
+
+    default:
+        fputs("Usage: CodexAccountSwitcher session <protection|snapshot|continuity> [args]\n", stderr)
+        exit(1)
+    }
+}
+
+private func handleContinuity(_ args: ArraySlice<String>) -> Never {
+    let store = ContinuityTestStore()
+
+    switch args.first {
+    case "begin":
+        let accounts = cliReadAccounts()
+        let source = accounts.first(where: { $0.isActive })?.email
+        do {
+            let record = try store.begin(sourceAccount: source)
+            print("marker:\(record.marker)")
+            exit(0)
+        } catch {
+            fputs("Error: \(error.localizedDescription)\n", stderr)
+            exit(1)
+        }
+
+    case "locate":
+        do {
+            guard let record = try store.loadRecord() else {
+                fputs("Error: no continuity test in progress\n", stderr)
+                exit(1)
+            }
+            guard let match = try makeSessionMarkerFinder().find(marker: record.marker) else {
+                print("marker:not-found")
+                exit(1)
+            }
+            let updated = try store.recordMarkerMatch(match)
+            print("marker:found session:\(updated.sessionID ?? "-") path:\(match.fileURL.path)")
+            exit(0)
+        } catch {
+            fputs("Error: \(error.localizedDescription)\n", stderr)
+            exit(1)
+        }
+
+    case "finish":
+        guard let verdictRaw = args.dropFirst().first,
+              let verdict = ContinuityVerdict(rawValue: verdictRaw) else {
+            fputs("Usage: CodexAccountSwitcher session continuity finish <pass|partial|fail>\n", stderr)
+            exit(1)
+        }
+        do {
+            let accounts = cliReadAccounts()
+            let target = accounts.first(where: { $0.isActive })?.email
+            let record = try store.finish(verdict: verdict, targetAccount: target, followUpSucceeded: nil, notes: nil)
+            print("verdict:\(verdictRaw) target:\(record.targetAccount ?? "-")")
+            exit(0)
+        } catch {
+            fputs("Error: \(error.localizedDescription)\n", stderr)
+            exit(1)
+        }
+
+    default:
+        fputs("Usage: CodexAccountSwitcher session continuity <begin|locate|finish>\n", stderr)
+        exit(1)
+    }
 }
 
 private func handleRotation(_ args: ArraySlice<String>) -> Never {
@@ -2453,6 +3329,22 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
     let targetAuthPath = "\(home)/.codex/accounts/\(match.key).auth.json"
     let mainAuthPath = "\(home)/.codex/auth.json"
 
+    // Session protection: baseline capture is fail-closed — an error aborts
+    // the switch instead of proceeding unprotected.
+    let protection = SessionProtectionDefaults.enabled
+    let snapshotter = makeSessionSnapshotter()
+    let previousEmail = accounts.first(where: { $0.isActive })?.email
+    let targetEmail = decodeBase64Key(match.key) ?? match.key
+
+    var beforeSnapshot: SessionSnapshot?
+    if protection {
+        do { beforeSnapshot = try snapshotter.capture(mode: .contentHashed) }
+        catch {
+            fputs("Error: session snapshot failed — \(error.localizedDescription); switch aborted before any file was changed.\n", stderr)
+            exit(1)
+        }
+    }
+
     // 2. Refresh target account's token and normalize fields
     if let targetData = try? Data(contentsOf: URL(fileURLWithPath: targetAuthPath)),
        let targetAuth = try? JSONSerialization.jsonObject(with: targetData) as? [String: Any] {
@@ -2475,6 +3367,17 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         }
     }
 
+    // Quiescent baseline immediately before the swap so the isolation window
+    // covers the swap alone, not the token refresh.
+    var quiescentBefore: SessionSnapshot?
+    if protection {
+        do { quiescentBefore = try snapshotter.capture(mode: .metadataOnly) }
+        catch {
+            fputs("Error: session snapshot failed — \(error.localizedDescription); switch aborted before any file was changed.\n", stderr)
+            exit(1)
+        }
+    }
+
     // 3. Copy target auth to main auth.json
     do {
         let targetURL = URL(fileURLWithPath: targetAuthPath)
@@ -2488,13 +3391,54 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         exit(1)
     }
 
+    // Post-swap abort: restore the previous account's auth.json first; if that
+    // fails, point the registry at the target so auth.json and registry stay
+    // consistent either way and neither account's stored tokens are touched.
+    func abortPostSwap(registryUpdated: Bool, _ message: String) -> Never {
+        if let restoreError = restorePreviousAuth(previousEmail: previousEmail) {
+            if !registryUpdated { _ = cliUpdateRegistry(targetEmail) }
+            fputs("Error: \(message)\nRestore of \(previousEmail ?? "previous account") failed — \(restoreError). Registry left on \(targetEmail) to stay consistent.\n", stderr)
+            exit(1)
+        }
+        if registryUpdated { _ = cliUpdateRegistry(previousEmail) }
+        fputs("Error: \(message)\nRolled back to \(previousEmail ?? "previous account").\n", stderr)
+        exit(1)
+    }
+
+    // Isolation check over the swap window only.
+    if protection, let before = quiescentBefore {
+        let after: SessionSnapshot
+        do { after = try snapshotter.capture(mode: .metadataOnly) }
+        catch {
+            abortPostSwap(registryUpdated: false, "session snapshot failed — \(error.localizedDescription)")
+        }
+        if !snapshotter.compare(before, after).isUnchanged {
+            abortPostSwap(registryUpdated: false, "protected files changed during the auth swap")
+        }
+    }
+
     // 4. Update registry
-    let email = decodeBase64Key(match.key) ?? match.key
-    if let regError = cliUpdateRegistry(email) {
+    if let regError = cliUpdateRegistry(targetEmail) {
         fputs("Warning: registry update failed — \(regError)\n", stderr)
     }
 
-    // 5. Reflect in Codex App if enabled
+    // 5. Destructive-change check BEFORE the app restart, mirroring the GUI.
+    if protection, let before = beforeSnapshot {
+        let after: SessionSnapshot
+        do { after = try snapshotter.capture(mode: .contentHashed) }
+        catch {
+            abortPostSwap(registryUpdated: true, "session snapshot failed — \(error.localizedDescription)")
+        }
+        let diff = snapshotter.compare(before, after)
+        if diff.hasDestructiveChange {
+            abortPostSwap(registryUpdated: true, "session files missing after switch:\n\(diff.deleted.joined(separator: "\n"))")
+        }
+        if !diff.isUnchanged {
+            fputs("Warning: protected files changed — deleted:\(diff.deleted.count) modified:\(diff.modified.count) added:\(diff.added.count)\n", stderr)
+        }
+    }
+
+    // 6. Reflect in Codex App if enabled
     if scope.reflectCodexApp {
         let result = cliRestartCodex(launchIfNotRunning: scope.launchCodexIfClosed)
         if result.status != 0 {

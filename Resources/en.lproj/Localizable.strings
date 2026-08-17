@@ -18,6 +18,39 @@
 "scope_launch_on" = "Launch if closed: On";
 "scope_launch_off" = "Launch if closed: Off";
 
+/* Session Protection */
+"session_protection" = "Session protection";
+"session_protection_on" = "Session protection: On";
+"session_protection_off" = "Session protection: Off";
+"snapshot_summary" = "Last switch: %ld deleted · %ld changed · %ld intact";
+"continuity_test" = "Continuity test";
+"begin_continuity_test" = "Begin test";
+"locate_marker" = "Locate marker";
+"mark_pass" = "Mark as PASS";
+"mark_partial" = "Mark as PARTIAL";
+"mark_fail" = "Mark as FAIL";
+"continuity_status" = "Verdict: %@";
+"continuity_started" = "Continuity test started";
+"continuity_started_msg" = "Marker copied to clipboard:\n%@\nPaste it into a Codex conversation, switch accounts, then locate the marker.";
+"marker_tooltip" = "Click to copy the marker to clipboard";
+"marker_found" = "Marker found";
+"marker_found_msg" = "Marker found in: %@";
+"marker_not_found" = "Marker not found";
+"marker_not_found_msg" = "The marker has not appeared in local session files yet. Send it in a Codex conversation first.";
+"alert_continuity_failed" = "Continuity test failed";
+"alert_protected_files_changed" = "Protected files changed during switch";
+"alert_protected_files_changed_msg" = "A protected session file changed while authentication was being replaced. The switch was aborted before the Codex app was relaunched. Try switching again.";
+"alert_session_files_missing" = "Session files missing after switch";
+"alert_session_files_missing_msg" = "Rolled back to the previous account because protected session files were deleted:\n%@";
+"alert_snapshot_failed" = "Session snapshot failed";
+"alert_snapshot_failed_msg" = "A protected-file snapshot could not be captured, so the switch was aborted. No stored tokens were changed.";
+"alert_restore_failed_msg" = "%@\n\nThe previous account could not be restored, so the registry was left pointing at the target account to keep state consistent. No stored tokens were lost.";
+"begin_continuity_test_new" = "Begin new test";
+"verdict_pending" = "Pending";
+"verdict_pass" = "Pass";
+"verdict_partial" = "Partial";
+"verdict_fail" = "Fail";
+
 /* Status Bar */
 "status_5hr" = "%@ · 5hr %@ left";
 "status_weekly" = "%@ · W %@";

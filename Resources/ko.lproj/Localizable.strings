@@ -18,6 +18,39 @@
 "scope_launch_on" = "꺼져 있으면 실행: 켬";
 "scope_launch_off" = "꺼져 있으면 실행: 끔";
 
+/* Session Protection */
+"session_protection" = "세션 보호";
+"session_protection_on" = "세션 보호: 켬";
+"session_protection_off" = "세션 보호: 끔";
+"snapshot_summary" = "마지막 전환: 삭제 %ld · 변경 %ld · 유지 %ld";
+"continuity_test" = "연속성 테스트";
+"begin_continuity_test" = "테스트 시작";
+"locate_marker" = "마커 찾기";
+"mark_pass" = "PASS 판정";
+"mark_partial" = "PARTIAL 판정";
+"mark_fail" = "FAIL 판정";
+"continuity_status" = "판정: %@";
+"continuity_started" = "연속성 테스트 시작";
+"continuity_started_msg" = "마커가 클립보드에 복사되었습니다:\n%@\nCodex 대화에 붙여넣은 뒤 계정을 전환하고 마커를 찾아보세요.";
+"marker_tooltip" = "클릭하면 마커를 클립보드에 복사합니다";
+"marker_found" = "마커를 찾았습니다";
+"marker_found_msg" = "마커 위치: %@";
+"marker_not_found" = "마커를 찾지 못했습니다";
+"marker_not_found_msg" = "아직 로컬 세션 파일에 마커가 기록되지 않았습니다. 먼저 Codex 대화에서 마커를 전송하세요.";
+"alert_continuity_failed" = "연속성 테스트 실패";
+"alert_protected_files_changed" = "전환 중 보호 파일이 변경되었습니다";
+"alert_protected_files_changed_msg" = "인증 교체 중 보호된 세션 파일이 변경되어 Codex 앱 재실행 전에 전환이 중단되었습니다. 다시 전환해 보세요.";
+"alert_session_files_missing" = "전환 후 세션 파일이 사라졌습니다";
+"alert_session_files_missing_msg" = "보호된 세션 파일이 삭제되어 이전 계정으로 자동 롤백했습니다:\n%@";
+"alert_snapshot_failed" = "세션 스냅샷 실패";
+"alert_snapshot_failed_msg" = "보호 파일 스냅샷을 만들 수 없어 전환을 중단했습니다. 저장된 토큰은 변경되지 않았습니다.";
+"alert_restore_failed_msg" = "%@\n\n이전 계정 복원에 실패하여 상태 일관성을 위해 registry를 대상 계정으로 유지했습니다. 저장된 토큰은 유실되지 않았습니다.";
+"begin_continuity_test_new" = "새 테스트 시작";
+"verdict_pending" = "대기 중";
+"verdict_pass" = "통과";
+"verdict_partial" = "부분 통과";
+"verdict_fail" = "실패";
+
 /* Status Bar */
 "status_5hr" = "%@ · 5시간 %@ 남음";
 "status_weekly" = "%@ · 주 %@";
