@@ -50,6 +50,8 @@
 | 네이티브 OAuth | 외부 `codex-auth` 의존 없이 OAuth 2.0 PKCE 흐름을 앱 안에서 처리합니다. |
 | 설치앱 제공 | 터미널 없이 더블클릭 설치 가능한 설치 앱을 빌드할 수 있습니다. |
 
+Codex 앱 반영을 켜면 앱 본체와 자식 `codex app-server`를 함께 종료한 뒤 다시 실행합니다. 저장된 마지막 워크스페이스가 있으면 `codex://threads/new?path=...` deep link로 바로 열어, 전환 뒤 Internet/Workspace를 수동으로 다시 누르는 단계를 줄입니다.
+
 ---
 
 ## 설치

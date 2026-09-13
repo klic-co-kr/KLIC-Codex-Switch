@@ -495,6 +495,53 @@ private func cliRun(_ executable: String, _ args: [String]) -> CommandResult {
     }
 }
 
+private func cliCodexProcessTreePIDs(rootPIDs: [String]) -> Set<String> {
+    guard !rootPIDs.isEmpty else { return [] }
+    let result = cliRun("/bin/ps", ["-axo", "pid=,ppid="])
+    guard result.status == 0 else { return Set(rootPIDs) }
+
+    var childrenByParent: [String: [String]] = [:]
+    for line in result.output.split(whereSeparator: \.isNewline) {
+        let fields = line.split(whereSeparator: \.isWhitespace)
+        guard fields.count >= 2,
+              fields[0].allSatisfy(\.isNumber),
+              fields[1].allSatisfy(\.isNumber) else { continue }
+        childrenByParent[String(fields[1]), default: []].append(String(fields[0]))
+    }
+
+    var tree = Set(rootPIDs)
+    var pending = rootPIDs
+    while let parent = pending.popLast() {
+        for child in childrenByParent[parent, default: []] where tree.insert(child).inserted {
+            pending.append(child)
+        }
+    }
+    return tree
+}
+
+private func cliProcessIdentity(pid: String) -> String? {
+    let result = cliRun("/bin/ps", ["-p", pid, "-o", "user=,lstart=,command="])
+    guard result.status == 0 else { return nil }
+    let identity = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    return identity.isEmpty ? nil : identity
+}
+
+private func cliCodexProcessIdentities(rootPIDs: [String]) -> [String: String] {
+    cliCodexProcessTreePIDs(rootPIDs: rootPIDs).reduce(into: [String: String]()) { result, pid in
+        if let identity = cliProcessIdentity(pid: pid) {
+            result[pid] = identity
+        }
+    }
+}
+
+private func cliMatchingPIDs(_ identities: [String: String]) -> [String] {
+    identities.compactMap { pid, expectedIdentity in
+        guard let currentIdentity = cliProcessIdentity(pid: pid),
+              currentIdentity == expectedIdentity else { return nil }
+        return pid
+    }
+}
+
 private func cliRefreshToken(refreshToken: String) -> (accessToken: String, newRefreshToken: String?, idToken: String?)? {
     guard let url = URL(string: "https://auth.openai.com/oauth/token"),
           let encoded = refreshToken.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
@@ -600,15 +647,38 @@ private func cliUpdateRegistry(_ key: String?) -> String? {
 }
 
 private func cliRestartCodex(launchIfNotRunning: Bool = true) -> CommandResult {
-    let wasRunning = !cliCodexPIDs().isEmpty
+    let rootPIDs = cliCodexPIDs()
+    let wasRunning = !rootPIDs.isEmpty
+    let initialTree = cliCodexProcessTreePIDs(rootPIDs: rootPIDs)
+    var processIdentities = cliCodexProcessIdentities(rootPIDs: rootPIDs)
+    if wasRunning && processIdentities.count != initialTree.count {
+        return CommandResult(status: 1, output: "Could not verify all Codex process identities; restart aborted.")
+    }
+
+    // Ask the app to terminate cleanly first. The app owns child app-server
+    // processes; waiting for that tree prevents the next launch from reusing
+    // an app-server that still has the previous account in memory.
+    if wasRunning {
+        NSRunningApplication.runningApplications(withBundleIdentifier: codexBundleIdentifier)
+            .forEach { _ = $0.terminate() }
+    }
+
     for attempt in 1...6 {
-        let pids = cliCodexPIDs()
+        let currentTree = cliCodexProcessTreePIDs(rootPIDs: rootPIDs)
+        for pid in currentTree where processIdentities[pid] == nil {
+            if let identity = cliProcessIdentity(pid: pid) {
+                processIdentities[pid] = identity
+            } else {
+                return CommandResult(status: 1, output: "Could not verify a Codex child process identity; restart aborted.")
+            }
+        }
+        let pids = cliMatchingPIDs(processIdentities)
         if pids.isEmpty { break }
         let signal = attempt == 1 ? "-TERM" : "-KILL"
         _ = cliRun("/bin/kill", [signal] + pids)
         Thread.sleep(forTimeInterval: 1)
     }
-    let remaining = cliCodexPIDs()
+    let remaining = cliMatchingPIDs(processIdentities)
     if !remaining.isEmpty {
         return CommandResult(status: 1, output: "Codex processes survived force quit: \(remaining.joined(separator: ", "))")
     }
@@ -619,6 +689,15 @@ private func cliRestartCodex(launchIfNotRunning: Bool = true) -> CommandResult {
     if openResult.status != 0 { return openResult }
     if !cliWaitForCodexApp() {
         return CommandResult(status: 1, output: "Codex App did not report as running after launch.")
+    }
+
+    // The documented deep link both focuses a workspace and starts a fresh
+    // thread. This removes the extra manual Internet/Workspace navigation
+    // after an account switch, while doing nothing when no workspace is saved.
+    if let workspaceURL = cliLastWorkspaceDeepLink() {
+        Thread.sleep(forTimeInterval: 0.5)
+        let workspaceResult = cliRun("/usr/bin/open", [workspaceURL])
+        if workspaceResult.status != 0 { return workspaceResult }
     }
     return CommandResult(status: 0, output: "ok")
 }
@@ -635,6 +714,31 @@ private func cliWaitForCodexApp(timeout: TimeInterval = 10) -> Bool {
         Thread.sleep(forTimeInterval: 0.25)
     } while Date() < deadline
     return !cliCodexPIDs().isEmpty
+}
+
+private func cliLastWorkspaceDeepLink() -> String? {
+    let stateURL = URL(fileURLWithPath: "\(codexHomeDirectory())/.codex/.codex-global-state.json")
+    guard let data = try? Data(contentsOf: stateURL),
+          let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return nil
+    }
+
+    let keys = ["active-workspace-roots", "electron-saved-workspace-roots"]
+    let fileManager = FileManager.default
+    for key in keys {
+        guard let roots = state[key] as? [String] else { continue }
+        guard let path = roots.first(where: {
+            $0.hasPrefix("/") && fileManager.fileExists(atPath: $0)
+        }) else { continue }
+
+        var components = URLComponents()
+        components.scheme = "codex"
+        components.host = "threads"
+        components.path = "/new"
+        components.queryItems = [URLQueryItem(name: "path", value: path)]
+        return components.url?.absoluteString
+    }
+    return nil
 }
 
 // MARK: - Session Continuity Helpers
