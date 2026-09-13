@@ -599,16 +599,131 @@ private func cliUpdateRegistry(_ key: String?) -> String? {
     }
 }
 
-private func cliRestartCodex(launchIfNotRunning: Bool = true) -> CommandResult {
-    let wasRunning = !cliCodexPIDs().isEmpty
+private struct CodexProcessRecord {
+    let pid: String
+    let parentPID: String
+    let identity: String
+    let command: String
+}
+
+private func cliCodexProcessRecords() -> [String: CodexProcessRecord] {
+    let result = cliRun("/bin/ps", ["-axo", "pid=,ppid=,user=,lstart=,command="])
+    guard result.status == 0 else { return [:] }
+
+    var records: [String: CodexProcessRecord] = [:]
+    for line in result.output.split(whereSeparator: \.isNewline) {
+        let fields = line.split(whereSeparator: \.isWhitespace)
+        // pid, ppid, user, five lstart fields, command
+        guard fields.count >= 9,
+              fields[0].allSatisfy(\.isNumber),
+              fields[1].allSatisfy(\.isNumber) else { continue }
+        let pid = String(fields[0])
+        let parentPID = String(fields[1])
+        let command = fields.dropFirst(8).map(String.init).joined(separator: " ")
+        guard !command.isEmpty else { continue }
+        records[pid] = CodexProcessRecord(
+            pid: pid,
+            parentPID: parentPID,
+            identity: fields.map(String.init).joined(separator: " "),
+            command: command)
+    }
+    return records
+}
+
+private func cliProcessTreePIDs(
+    rootPIDs: [String],
+    records: [String: CodexProcessRecord]
+) -> Set<String> {
+    guard !rootPIDs.isEmpty else { return [] }
+    var childrenByParent: [String: [String]] = [:]
+    for record in records.values {
+        childrenByParent[record.parentPID, default: []].append(record.pid)
+    }
+
+    var tree = Set(rootPIDs)
+    var pending = rootPIDs
+    while let parent = pending.popLast() {
+        for child in childrenByParent[parent, default: []] where tree.insert(child).inserted {
+            pending.append(child)
+        }
+    }
+    return tree
+}
+
+private func cliProcessIdentities(
+    rootPIDs: [String],
+    records: [String: CodexProcessRecord]
+) -> [String: String] {
+    cliProcessTreePIDs(rootPIDs: rootPIDs, records: records).reduce(into: [String: String]()) { result, pid in
+        if let record = records[pid] {
+            result[pid] = record.identity
+        }
+    }
+}
+
+private func cliMatchingPIDs(_ identities: [String: String]) -> [String] {
+    let records = cliCodexProcessRecords()
+    return identities.compactMap { pid, expectedIdentity in
+        guard let record = records[pid], record.identity == expectedIdentity else { return nil }
+        return pid
+    }
+}
+
+private func cliIsCodexAppServer(_ command: String) -> Bool {
+    let arguments = command.split(whereSeparator: \.isWhitespace).map(String.init)
+    return command.contains("/Contents/Resources/codex") && arguments.contains("app-server")
+}
+
+private func cliCodexAppServerPIDs(rootPIDs: [String]) -> [String] {
+    let records = cliCodexProcessRecords()
+    let tree = cliProcessTreePIDs(rootPIDs: rootPIDs, records: records)
+    return tree.compactMap { records[$0] }
+        .filter { cliIsCodexAppServer($0.command) }
+        .map(\.pid)
+}
+
+private func cliWaitForCodexAppServer(
+    rootPIDs: [String],
+    replacedIdentities: [String: String],
+    timeout: TimeInterval = 10
+) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+        let records = cliCodexProcessRecords()
+        let tree = cliProcessTreePIDs(rootPIDs: rootPIDs, records: records)
+        let replacementExists = tree.contains { pid in
+            guard let record = records[pid], cliIsCodexAppServer(record.command) else { return false }
+            return replacedIdentities[pid] != record.identity
+        }
+        if replacementExists { return true }
+        Thread.sleep(forTimeInterval: 0.25)
+    } while Date() < deadline
+    return false
+}
+
+private func cliRestartCodexAppProcess(launchIfNotRunning: Bool) -> CommandResult {
+    let rootPIDs = cliCodexPIDs()
+    let wasRunning = !rootPIDs.isEmpty
+    let records = cliCodexProcessRecords()
+    let processIdentities = cliProcessIdentities(rootPIDs: rootPIDs, records: records)
+    let expectedProcessCount = cliProcessTreePIDs(rootPIDs: rootPIDs, records: records).count
+    if wasRunning && processIdentities.count != expectedProcessCount {
+        return CommandResult(status: 1, output: "Could not verify all Codex process identities; restart aborted.")
+    }
+
+    if wasRunning {
+        NSRunningApplication.runningApplications(withBundleIdentifier: codexBundleIdentifier)
+            .forEach { _ = $0.terminate() }
+    }
+
     for attempt in 1...6 {
-        let pids = cliCodexPIDs()
+        let pids = cliMatchingPIDs(processIdentities)
         if pids.isEmpty { break }
         let signal = attempt == 1 ? "-TERM" : "-KILL"
         _ = cliRun("/bin/kill", [signal] + pids)
         Thread.sleep(forTimeInterval: 1)
     }
-    let remaining = cliCodexPIDs()
+    let remaining = cliMatchingPIDs(processIdentities)
     if !remaining.isEmpty {
         return CommandResult(status: 1, output: "Codex processes survived force quit: \(remaining.joined(separator: ", "))")
     }
@@ -621,6 +736,50 @@ private func cliRestartCodex(launchIfNotRunning: Bool = true) -> CommandResult {
         return CommandResult(status: 1, output: "Codex App did not report as running after launch.")
     }
     return CommandResult(status: 0, output: "ok")
+}
+
+private func cliRestartCodex(launchIfNotRunning: Bool = true) -> CommandResult {
+    let rootPIDs = cliCodexPIDs()
+    guard !rootPIDs.isEmpty else {
+        return cliRestartCodexAppProcess(launchIfNotRunning: launchIfNotRunning)
+    }
+
+    // Change auth on disk, then recycle only the desktop app-server. The
+    // Electron shell and its current workspace/thread stay open and reconnect
+    // to a server that reads the newly selected account.
+    let appServerPIDs = cliCodexAppServerPIDs(rootPIDs: rootPIDs)
+    guard !appServerPIDs.isEmpty else {
+        // A running shell without its server is already degraded; use the
+        // existing full relaunch path as an automatic recovery fallback.
+        return cliRestartCodexAppProcess(launchIfNotRunning: true)
+    }
+
+    let records = cliCodexProcessRecords()
+    let processIdentities = cliProcessIdentities(rootPIDs: appServerPIDs, records: records)
+    let expectedProcessCount = cliProcessTreePIDs(rootPIDs: appServerPIDs, records: records).count
+    if processIdentities.count != expectedProcessCount {
+        return CommandResult(status: 1, output: "Could not verify all Codex app-server identities; reconnect aborted.")
+    }
+
+    for attempt in 1...6 {
+        let pids = cliMatchingPIDs(processIdentities)
+        if pids.isEmpty { break }
+        let signal = attempt == 1 ? "-TERM" : "-KILL"
+        _ = cliRun("/bin/kill", [signal] + pids)
+        Thread.sleep(forTimeInterval: 0.5)
+    }
+    let remaining = cliMatchingPIDs(processIdentities)
+    if !remaining.isEmpty {
+        return CommandResult(status: 1, output: "Codex app-server survived reconnect: \(remaining.joined(separator: ", "))")
+    }
+
+    if cliWaitForCodexAppServer(rootPIDs: rootPIDs, replacedIdentities: processIdentities) {
+        return CommandResult(status: 0, output: "ok")
+    }
+
+    // If the shell did not respawn its server, recover automatically without
+    // asking the user to quit, relaunch, or reopen a workspace.
+    return cliRestartCodexAppProcess(launchIfNotRunning: true)
 }
 
 private func cliCodexPIDs() -> [String] {
