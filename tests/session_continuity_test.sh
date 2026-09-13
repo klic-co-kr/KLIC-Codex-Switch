@@ -12,8 +12,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$("$ROOT_DIR/build.sh")/Contents/MacOS/CodexAccountSwitcher"
 
 export CODEX_SWITCHER_HOME="$(mktemp -d)"
-export CODEX_SWITCHER_DEFAULTS_SUITE="test-session-continuity"
-trap 'rm -rf "$CODEX_SWITCHER_HOME"; rm -f "$HOME/Library/Preferences/test-session-continuity.plist"' EXIT
+export CODEX_SWITCHER_DEFAULTS_SUITE="test-session-continuity-$RANDOM-$$"
+trap 'rm -rf "$CODEX_SWITCHER_HOME"; rm -f "$HOME/Library/Preferences/$CODEX_SWITCHER_DEFAULTS_SUITE.plist"' EXIT
 
 fail() {
   echo "FAIL: $1" >&2
@@ -21,7 +21,7 @@ fail() {
 }
 
 mkdir -p "$CODEX_SWITCHER_HOME/.codex/accounts" "$CODEX_SWITCHER_HOME/.codex/sessions/2026/08/17"
-echo '{"tokens":{"access_token":"x","refresh_token":"y"},"auth_mode":"chatgpt"}' > "$CODEX_SWITCHER_HOME/.codex/auth.json"
+echo '{"tokens":{"access_token":"x"},"auth_mode":"chatgpt"}' > "$CODEX_SWITCHER_HOME/.codex/auth.json"
 echo '{"active_account_key":"a@example.com"}' > "$CODEX_SWITCHER_HOME/.codex/accounts/registry.json"
 echo '{"tokens":{"access_token":"a"}}' > "$CODEX_SWITCHER_HOME/.codex/accounts/$(echo -n 'a@example.com' | base64 | tr -d '=').auth.json"
 echo '{"tokens":{"access_token":"b"}}' > "$CODEX_SWITCHER_HOME/.codex/accounts/$(echo -n 'b@example.com' | base64 | tr -d '=').auth.json"

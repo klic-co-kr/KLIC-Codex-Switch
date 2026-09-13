@@ -89,6 +89,9 @@
 "alert_cannot_toggle_msg" = "전환하려면 저장된 계정이 정확히 2개이고 활성 계정이 1개여야 합니다.";
 "alert_token_save_failed" = "활성 토큰을 저장할 수 없습니다";
 "alert_switch_failed" = "전환 실패";
+"alert_target_auth_missing_msg" = "선택한 계정 인증 파일이 없거나 손상되었습니다. 해당 계정으로 한 번 로그인한 뒤 다시 시도하세요.";
+"alert_target_auth_refresh_failed_msg" = "선택한 계정 인증이 만료되었거나 폐기되었습니다. 해당 계정으로 한 번 로그인한 뒤 다시 시도하세요.";
+"alert_target_auth_invalid_msg" = "선택한 계정 인증 정보를 읽을 수 없습니다. 해당 계정을 다시 등록한 뒤 시도하세요.";
 "alert_relaunch_failed" = "Codex 재시작 실패";
 "alert_device_login_failed" = "기기 코드 로그인 실패";
 "alert_maintenance_failed" = "%@ 실패";
@@ -103,6 +106,7 @@
 "err_no_accounts" = "codex-auth 계정을 찾을 수 없습니다.";
 "err_active_key" = "registry.json에서 active_account_key를 읽을 수 없습니다.";
 "err_auth_missing" = "%@에 활성 인증 파일이 없습니다.";
+"err_active_auth_mismatch" = "현재 Codex 인증 계정(%@)과 전환기 활성 계정(%@)이 다릅니다. 계정 파일을 확인한 뒤 다시 시도하세요.";
 "err_force_quit" = "Codex 프로세스가 강제 종료되지 않았습니다: %@";
 "log_force_quitting" = "Codex 앱 프로세스 강제 종료 중...";
 "err_not_running" = "Codex 앱이 실행 후에도 실행 중으로 보고되지 않았습니다.";

@@ -89,6 +89,9 @@
 "alert_cannot_toggle_msg" = "Toggle requires exactly two saved accounts and one active account.";
 "alert_token_save_failed" = "Could not save active token";
 "alert_switch_failed" = "Switch failed";
+"alert_target_auth_missing_msg" = "The selected account auth file is missing or invalid. Sign in to that account once, then retry.";
+"alert_target_auth_refresh_failed_msg" = "The selected account credentials are expired or revoked. Sign in to that account once, then retry.";
+"alert_target_auth_invalid_msg" = "The selected account auth data could not be read. Add that account again, then retry.";
 "alert_relaunch_failed" = "Codex relaunch failed";
 "alert_device_login_failed" = "Device-code login failed";
 "alert_maintenance_failed" = "%@ failed";
@@ -103,6 +106,7 @@
 "err_no_accounts" = "No codex-auth accounts found.";
 "err_active_key" = "Could not read active_account_key from registry.json.";
 "err_auth_missing" = "Active auth file does not exist at %@.";
+"err_active_auth_mismatch" = "Current Codex auth account (%@) does not match switcher active account (%@). Check account files, then retry.";
 "err_force_quit" = "Codex processes survived force quit: %@";
 "log_force_quitting" = "Force-quitting Codex App process tree...";
 "err_not_running" = "Codex App did not report as running after launch.";

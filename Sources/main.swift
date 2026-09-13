@@ -403,16 +403,36 @@ private func decodeBase64Key(_ key: String) -> String? {
     return String(data: data, encoding: .utf8)
 }
 
+private func decodeJWTPayload(_ token: String) -> [String: Any]? {
+    let segments = token.split(separator: ".")
+    guard segments.count == 3 else { return nil }
+    let payload = String(segments[1])
+        .replacingOccurrences(of: "-", with: "+")
+        .replacingOccurrences(of: "_", with: "/")
+    let padding = String(repeating: "=", count: (4 - payload.count % 4) % 4)
+    guard let data = Data(base64Encoded: payload + padding),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return nil
+    }
+    return json
+}
+
 private func extractEmail(from auth: [String: Any]) -> String? {
     guard let tokens = auth["tokens"] as? [String: Any],
           let accessToken = tokens["access_token"] as? String else { return nil }
-    let segments = accessToken.split(separator: ".")
-    guard segments.count == 3 else { return nil }
-    let payload = String(segments[1])
-    let padding = String(repeating: "=", count: (4 - payload.count % 4) % 4)
-    guard let data = Data(base64Encoded: payload + padding),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-    return json["email"] as? String
+    if let payload = decodeJWTPayload(accessToken) {
+        if let email = payload["email"] as? String { return email }
+        if let profile = payload["https://api.openai.com/profile"] as? [String: Any],
+           let email = profile["email"] as? String {
+            return email
+        }
+    }
+    if let idToken = tokens["id_token"] as? String,
+       let payload = decodeJWTPayload(idToken),
+       let email = payload["email"] as? String {
+        return email
+    }
+    return nil
 }
 
 private func normalizeAuth(_ auth: [String: Any]) -> [String: Any] {
@@ -427,6 +447,61 @@ private func normalizeAuth(_ auth: [String: Any]) -> [String: Any] {
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     result["last_refresh"] = formatter.string(from: Date())
     return result
+}
+
+/// A Codex desktop login can update auth.json without updating the switcher's
+/// registry. Reconcile only when the current JWT belongs to an account that is
+/// already stored; unknown accounts stay untouched and are handled explicitly
+/// by the add-account flow.
+private func reconcileRegistryWithMainAuth() -> String? {
+    let home = codexHomeDirectory()
+    let accountsDir = "\(home)/.codex/accounts"
+    let registryURL = URL(fileURLWithPath: "\(accountsDir)/registry.json")
+    let mainAuthURL = URL(fileURLWithPath: "\(home)/.codex/auth.json")
+
+    guard let registryData = try? Data(contentsOf: registryURL),
+          var registry = try? JSONSerialization.jsonObject(with: registryData) as? [String: Any],
+          let registeredKey = registry["active_account_key"] as? String,
+          let mainData = try? Data(contentsOf: mainAuthURL),
+          let mainAuth = try? JSONSerialization.jsonObject(with: mainData) as? [String: Any],
+          let mainEmail = extractEmail(from: mainAuth),
+          mainEmail != registeredKey else {
+        return nil
+    }
+
+    guard let files = try? FileManager.default.contentsOfDirectory(atPath: accountsDir) else {
+        return nil
+    }
+
+    // Registry keys may be user labels (for example, "codex_new"), while the
+    // JWT still carries the real email. Match stored auth contents instead of
+    // assuming filename key == email.
+    guard let matchingFilename = files.first(where: { filename in
+        guard filename.hasSuffix(".auth.json"),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: "\(accountsDir)/\(filename)")),
+              let auth = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return extractEmail(from: auth) == mainEmail
+    }) else {
+        return nil
+    }
+    let matchingStem = String(matchingFilename.dropLast(10))
+    guard let matchingKey = decodeBase64Key(matchingStem) else {
+        return nil
+    }
+    guard matchingKey != registeredKey else {
+        return nil
+    }
+
+    registry["active_account_key"] = matchingKey
+    do {
+        let data = try JSONSerialization.data(withJSONObject: registry, options: .prettyPrinted)
+        try data.write(to: registryURL, options: .atomic)
+        return nil
+    } catch {
+        return error.localizedDescription
+    }
 }
 
 private func httpGet(url: URL, headers: [String: String]) -> HTTPResult {
@@ -509,6 +584,7 @@ private func cliRefreshToken(refreshToken: String) -> (accessToken: String, newR
 }
 
 private func cliReadAccounts() -> [(key: String, email: String, auth: [String: Any], isActive: Bool)] {
+    _ = reconcileRegistryWithMainAuth()
     let home = codexHomeDirectory()
     let accountsDir = "\(home)/.codex/accounts"
     let fm = FileManager.default
@@ -547,6 +623,9 @@ private func cliReadAccounts() -> [(key: String, email: String, auth: [String: A
 }
 
 private func cliSyncActiveSnapshot() -> String? {
+    if let reconcileError = reconcileRegistryWithMainAuth() {
+        return reconcileError
+    }
     let home = codexHomeDirectory()
     let registryURL = URL(fileURLWithPath: "\(home)/.codex/accounts/registry.json")
     let activeAuthURL = URL(fileURLWithPath: "\(home)/.codex/auth.json")
@@ -561,6 +640,15 @@ private func cliSyncActiveSnapshot() -> String? {
         let accountAuthURL = URL(fileURLWithPath: "\(home)/.codex/accounts/\(encoded).auth.json")
         guard FileManager.default.fileExists(atPath: activeAuthURL.path) else {
             return "Active auth file missing at \(activeAuthURL.path)"
+        }
+        if let mainData = try? Data(contentsOf: activeAuthURL),
+           let mainAuth = try? JSONSerialization.jsonObject(with: mainData) as? [String: Any],
+           let mainEmail = extractEmail(from: mainAuth),
+           let storedData = try? Data(contentsOf: accountAuthURL),
+           let storedAuth = try? JSONSerialization.jsonObject(with: storedData) as? [String: Any],
+           let storedEmail = extractEmail(from: storedAuth),
+           mainEmail != storedEmail {
+            return "Current Codex auth account (\(mainEmail)) does not match active account (\(activeKey))."
         }
         if FileManager.default.fileExists(atPath: accountAuthURL.path) {
             try FileManager.default.removeItem(at: accountAuthURL)
@@ -669,38 +757,6 @@ private func cliMatchingPIDs(_ identities: [String: String]) -> [String] {
     }
 }
 
-private func cliIsCodexAppServer(_ command: String) -> Bool {
-    let arguments = command.split(whereSeparator: \.isWhitespace).map(String.init)
-    return command.contains("/Contents/Resources/codex") && arguments.contains("app-server")
-}
-
-private func cliCodexAppServerPIDs(rootPIDs: [String]) -> [String] {
-    let records = cliCodexProcessRecords()
-    let tree = cliProcessTreePIDs(rootPIDs: rootPIDs, records: records)
-    return tree.compactMap { records[$0] }
-        .filter { cliIsCodexAppServer($0.command) }
-        .map(\.pid)
-}
-
-private func cliWaitForCodexAppServer(
-    rootPIDs: [String],
-    replacedIdentities: [String: String],
-    timeout: TimeInterval = 10
-) -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
-    repeat {
-        let records = cliCodexProcessRecords()
-        let tree = cliProcessTreePIDs(rootPIDs: rootPIDs, records: records)
-        let replacementExists = tree.contains { pid in
-            guard let record = records[pid], cliIsCodexAppServer(record.command) else { return false }
-            return replacedIdentities[pid] != record.identity
-        }
-        if replacementExists { return true }
-        Thread.sleep(forTimeInterval: 0.25)
-    } while Date() < deadline
-    return false
-}
-
 private func cliRestartCodexAppProcess(launchIfNotRunning: Bool) -> CommandResult {
     let rootPIDs = cliCodexPIDs()
     let wasRunning = !rootPIDs.isEmpty
@@ -739,47 +795,11 @@ private func cliRestartCodexAppProcess(launchIfNotRunning: Bool) -> CommandResul
 }
 
 private func cliRestartCodex(launchIfNotRunning: Bool = true) -> CommandResult {
-    let rootPIDs = cliCodexPIDs()
-    guard !rootPIDs.isEmpty else {
-        return cliRestartCodexAppProcess(launchIfNotRunning: launchIfNotRunning)
-    }
-
-    // Change auth on disk, then recycle only the desktop app-server. The
-    // Electron shell and its current workspace/thread stay open and reconnect
-    // to a server that reads the newly selected account.
-    let appServerPIDs = cliCodexAppServerPIDs(rootPIDs: rootPIDs)
-    guard !appServerPIDs.isEmpty else {
-        // A running shell without its server is already degraded; use the
-        // existing full relaunch path as an automatic recovery fallback.
-        return cliRestartCodexAppProcess(launchIfNotRunning: true)
-    }
-
-    let records = cliCodexProcessRecords()
-    let processIdentities = cliProcessIdentities(rootPIDs: appServerPIDs, records: records)
-    let expectedProcessCount = cliProcessTreePIDs(rootPIDs: appServerPIDs, records: records).count
-    if processIdentities.count != expectedProcessCount {
-        return CommandResult(status: 1, output: "Could not verify all Codex app-server identities; reconnect aborted.")
-    }
-
-    for attempt in 1...6 {
-        let pids = cliMatchingPIDs(processIdentities)
-        if pids.isEmpty { break }
-        let signal = attempt == 1 ? "-TERM" : "-KILL"
-        _ = cliRun("/bin/kill", [signal] + pids)
-        Thread.sleep(forTimeInterval: 0.5)
-    }
-    let remaining = cliMatchingPIDs(processIdentities)
-    if !remaining.isEmpty {
-        return CommandResult(status: 1, output: "Codex app-server survived reconnect: \(remaining.joined(separator: ", "))")
-    }
-
-    if cliWaitForCodexAppServer(rootPIDs: rootPIDs, replacedIdentities: processIdentities) {
-        return CommandResult(status: 0, output: "ok")
-    }
-
-    // If the shell did not respawn its server, recover automatically without
-    // asking the user to quit, relaunch, or reopen a workspace.
-    return cliRestartCodexAppProcess(launchIfNotRunning: true)
+    // The desktop shell caches authentication in memory. Restart the complete
+    // app after the atomic auth swap so shell, app-server, and remote-control
+    // clients all load the same account. Codex restores its persisted window,
+    // workspace, and thread state; no new-thread deep link is sent.
+    return cliRestartCodexAppProcess(launchIfNotRunning: launchIfNotRunning)
 }
 
 private func cliCodexPIDs() -> [String] {
@@ -1289,6 +1309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isSwitching, !isRefreshing else { return }
         isRefreshing = true
         DispatchQueue.global(qos: .utility).async {
+            _ = reconcileRegistryWithMainAuth()
             let (accountInfos, _) = self.readAccountFiles()
 
             var activeAccountKey = accountInfos.first(where: { $0.isActive })?.key
@@ -2239,7 +2260,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         isSwitching = true
-        let previousActiveEmail = accounts.first(where: { $0.isActive })?.email
         beginSwitchAnimation(label: displayLabel(for: target))
         rebuildMenu()
 
@@ -2249,6 +2269,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.isSwitching = false
                     self.endSwitchAnimation()
                     self.showAlert(title: NSLocalizedString("alert_token_save_failed", comment: ""), message: syncError)
+                    self.refreshAccounts()
+                }
+                return
+            }
+
+            // The Codex app can change auth.json outside this switcher. Read
+            // active account again after reconciliation so rollback targets
+            // the account actually present on disk, not stale menu state.
+            let previousActiveEmail = self.readAccountFiles().accounts.first(where: { $0.isActive })?.email
+            if previousActiveEmail == decodeBase64Key(key) {
+                DispatchQueue.main.async {
+                    self.isSwitching = false
+                    self.endSwitchAnimation()
                     self.refreshAccounts()
                 }
                 return
@@ -2298,26 +2331,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-            // Refresh target account's token before switching
-            if let targetData = try? Data(contentsOf: URL(fileURLWithPath: targetAuthPath)),
-               let targetAuth = try? JSONSerialization.jsonObject(with: targetData) as? [String: Any] {
-                var updatedAuth = normalizeAuth(targetAuth)
-                if let tokens = updatedAuth["tokens"] as? [String: Any],
-                   let refreshToken = tokens["refresh_token"] as? String,
-                   let refreshed = self.refreshAccessToken(refreshToken: refreshToken) {
-                    var updatedTokens = tokens
-                    updatedTokens["access_token"] = refreshed.accessToken
-                    if let newRefresh = refreshed.newRefreshToken {
-                        updatedTokens["refresh_token"] = newRefresh
-                    }
-                    if let idToken = refreshed.idToken {
-                        updatedTokens["id_token"] = idToken
-                    }
-                    updatedAuth["tokens"] = updatedTokens
+            // Refresh target account's token before switching. A revoked target
+            // must never be copied into auth.json: doing so makes the desktop
+            // shell open its browser login flow instead of switching accounts.
+            guard let targetData = try? Data(contentsOf: URL(fileURLWithPath: targetAuthPath)),
+                  let targetAuth = try? JSONSerialization.jsonObject(with: targetData) as? [String: Any] else {
+                abortSwitch("alert_switch_failed", NSLocalizedString("alert_target_auth_missing_msg", comment: ""))
+                return
+            }
+            var updatedAuth = normalizeAuth(targetAuth)
+            if let tokens = updatedAuth["tokens"] as? [String: Any],
+               let refreshToken = tokens["refresh_token"] as? String {
+                guard let refreshed = self.refreshAccessToken(refreshToken: refreshToken) else {
+                    abortSwitch("alert_switch_failed", NSLocalizedString("alert_target_auth_refresh_failed_msg", comment: ""))
+                    return
                 }
-                if let newData = try? JSONSerialization.data(withJSONObject: updatedAuth, options: .prettyPrinted) {
-                    try? newData.write(to: URL(fileURLWithPath: targetAuthPath), options: .atomic)
+                var updatedTokens = tokens
+                updatedTokens["access_token"] = refreshed.accessToken
+                if let newRefresh = refreshed.newRefreshToken {
+                    updatedTokens["refresh_token"] = newRefresh
                 }
+                if let idToken = refreshed.idToken {
+                    updatedTokens["id_token"] = idToken
+                }
+                updatedAuth["tokens"] = updatedTokens
+            }
+            guard let newData = try? JSONSerialization.data(withJSONObject: updatedAuth, options: .prettyPrinted) else {
+                abortSwitch("alert_switch_failed", NSLocalizedString("alert_target_auth_invalid_msg", comment: ""))
+                return
+            }
+            do {
+                try newData.write(to: URL(fileURLWithPath: targetAuthPath), options: .atomic)
+            } catch {
+                abortSwitch("alert_switch_failed", error.localizedDescription)
+                return
             }
 
             // Quiescent baseline is captured immediately before the swap so the
@@ -2440,6 +2487,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Account File Operations
 
     private func syncActiveAuthSnapshot() -> String? {
+        if let reconcileError = reconcileRegistryWithMainAuth() {
+            return reconcileError
+        }
         let home = codexHomeDirectory()
         let registryURL = URL(fileURLWithPath: "\(home)/.codex/accounts/registry.json")
         let activeAuthURL = URL(fileURLWithPath: "\(home)/.codex/auth.json")
@@ -2455,6 +2505,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let accountAuthURL = URL(fileURLWithPath: "\(home)/.codex/accounts/\(encoded).auth.json")
             guard FileManager.default.fileExists(atPath: activeAuthURL.path) else {
                 return String(format: NSLocalizedString("err_auth_missing", comment: ""), activeAuthURL.path)
+            }
+            if let mainData = try? Data(contentsOf: activeAuthURL),
+               let mainAuth = try? JSONSerialization.jsonObject(with: mainData) as? [String: Any],
+               let mainEmail = extractEmail(from: mainAuth),
+               let storedData = try? Data(contentsOf: accountAuthURL),
+               let storedAuth = try? JSONSerialization.jsonObject(with: storedData) as? [String: Any],
+               let storedEmail = extractEmail(from: storedAuth),
+               mainEmail != storedEmail {
+                return String(format: NSLocalizedString("err_active_auth_mismatch", comment: ""), mainEmail, activeKey)
             }
 
             // Clean up old backups before creating new one
@@ -3492,8 +3551,15 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
     // the switch instead of proceeding unprotected.
     let protection = SessionProtectionDefaults.enabled
     let snapshotter = makeSessionSnapshotter()
-    let previousEmail = accounts.first(where: { $0.isActive })?.email
     let targetEmail = decodeBase64Key(match.key) ?? match.key
+
+    // cliSyncActiveSnapshot reconciles auth.json/registry first. Read the
+    // active account again so rollback never points at stale menu state.
+    let previousEmail = cliReadAccounts().first(where: { $0.isActive })?.email
+    if previousEmail == targetEmail {
+        fputs("Error: '\(match.email)' is already active\n", stderr)
+        exit(1)
+    }
 
     var beforeSnapshot: SessionSnapshot?
     if protection {
@@ -3504,26 +3570,40 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         }
     }
 
-    // 2. Refresh target account's token and normalize fields
-    if let targetData = try? Data(contentsOf: URL(fileURLWithPath: targetAuthPath)),
-       let targetAuth = try? JSONSerialization.jsonObject(with: targetData) as? [String: Any] {
-        var updatedAuth = normalizeAuth(targetAuth)
-        if let tokens = updatedAuth["tokens"] as? [String: Any],
-           let refreshToken = tokens["refresh_token"] as? String,
-           let refreshed = cliRefreshToken(refreshToken: refreshToken) {
-            var updatedTokens = tokens
-            updatedTokens["access_token"] = refreshed.accessToken
-            if let newRefresh = refreshed.newRefreshToken {
-                updatedTokens["refresh_token"] = newRefresh
-            }
-            if let idToken = refreshed.idToken {
-                updatedTokens["id_token"] = idToken
-            }
-            updatedAuth["tokens"] = updatedTokens
+    // 2. Refresh target account's token and normalize fields. A revoked target
+    // must never be copied into auth.json: that would send the desktop shell
+    // into browser login instead of switching accounts.
+    guard let targetData = try? Data(contentsOf: URL(fileURLWithPath: targetAuthPath)),
+          let targetAuth = try? JSONSerialization.jsonObject(with: targetData) as? [String: Any] else {
+        fputs("Error: selected account auth file is missing or invalid; sign in to that account once, then retry.\n", stderr)
+        exit(1)
+    }
+    var updatedAuth = normalizeAuth(targetAuth)
+    if let tokens = updatedAuth["tokens"] as? [String: Any],
+       let refreshToken = tokens["refresh_token"] as? String {
+        guard let refreshed = cliRefreshToken(refreshToken: refreshToken) else {
+            fputs("Error: selected account credentials are expired or revoked; sign in to that account once, then retry.\n", stderr)
+            exit(1)
         }
-        if let newData = try? JSONSerialization.data(withJSONObject: updatedAuth, options: .prettyPrinted) {
-            try? newData.write(to: URL(fileURLWithPath: targetAuthPath), options: .atomic)
+        var updatedTokens = tokens
+        updatedTokens["access_token"] = refreshed.accessToken
+        if let newRefresh = refreshed.newRefreshToken {
+            updatedTokens["refresh_token"] = newRefresh
         }
+        if let idToken = refreshed.idToken {
+            updatedTokens["id_token"] = idToken
+        }
+        updatedAuth["tokens"] = updatedTokens
+    }
+    guard let newData = try? JSONSerialization.data(withJSONObject: updatedAuth, options: .prettyPrinted) else {
+        fputs("Error: selected account auth data is invalid; sign in to that account once, then retry.\n", stderr)
+        exit(1)
+    }
+    do {
+        try newData.write(to: URL(fileURLWithPath: targetAuthPath), options: .atomic)
+    } catch {
+        fputs("Error: selected account auth file could not be updated — \(error.localizedDescription)\n", stderr)
+        exit(1)
     }
 
     // Quiescent baseline immediately before the swap so the isolation window
