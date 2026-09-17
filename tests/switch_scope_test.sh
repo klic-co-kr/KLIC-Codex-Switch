@@ -48,7 +48,7 @@ CODEX_SWITCHER_DEFAULTS_SUITE="$suite" CODEX_SWITCHER_HOME="$home" HOME="$home" 
 status="$(CODEX_SWITCHER_DEFAULTS_SUITE="$suite" CODEX_SWITCHER_HOME="$home" HOME="$home" "$bin" scope status)"
 [[ "$status" == "cli:on app:off launch:off" ]] || fail "app off status mismatch: $status"
 
-switch_output="$(CODEX_SWITCHER_DEFAULTS_SUITE="$suite" CODEX_SWITCHER_HOME="$home" HOME="$home" "$bin" switch two@example.com 2>&1)"
+switch_output="$(CODEX_SWITCHER_VERIFY_CHAIN=off CODEX_SWITCHER_DEFAULTS_SUITE="$suite" CODEX_SWITCHER_HOME="$home" HOME="$home" "$bin" switch two@example.com 2>&1)"
 [[ "$switch_output" == "switched:two@example.com" ]] || fail "switch with app reflection off should not relaunch or warn, got: $switch_output"
 grep -q 'two-token' "$home/.codex/auth.json" || fail "switch should still update CLI next-run auth"
 

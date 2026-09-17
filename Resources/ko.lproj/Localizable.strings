@@ -93,6 +93,9 @@
 "alert_target_auth_refresh_failed_msg" = "선택한 계정 인증이 만료되었거나 폐기되었습니다. 해당 계정으로 한 번 로그인한 뒤 다시 시도하세요.";
 "alert_target_auth_invalid_msg" = "선택한 계정 인증 정보를 읽을 수 없습니다. 해당 계정을 다시 등록한 뒤 시도하세요.";
 "alert_relaunch_failed" = "Codex 재시작 실패";
+"alert_switch_rolled_back" = "전환 실패 — 이전 계정으로 복구했습니다";
+"alert_rollback_failed" = "전환 실패 — 복구도 불완전합니다";
+"alert_switch_in_progress" = "다른 계정 전환이 이미 진행 중입니다.";
 "alert_device_login_failed" = "기기 코드 로그인 실패";
 "alert_maintenance_failed" = "%@ 실패";
 "alert_switch_scope_disabled" = "활성화된 전환 대상이 없습니다";
@@ -133,6 +136,7 @@
 "threshold_5h" = "5시간 전환 ≤ %@%%";
 "threshold_weekly" = "주간 전환 ≤ %@%%";
 "all_limits_reached" = "모든 계정 한도 임박";
+"rotation_unverified" = "자동 전환 보류 — 대상 UNVERIFIED";
 "status_rotation" = "%@ ⟳";
 
 /* Months */

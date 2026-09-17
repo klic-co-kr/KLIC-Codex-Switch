@@ -13,6 +13,7 @@ BIN="$("$ROOT_DIR/build.sh")/Contents/MacOS/CodexAccountSwitcher"
 
 export CODEX_SWITCHER_HOME="$(mktemp -d)"
 export CODEX_SWITCHER_DEFAULTS_SUITE="test-session-continuity-$RANDOM-$$"
+export CODEX_SWITCHER_VERIFY_CHAIN=off
 trap 'rm -rf "$CODEX_SWITCHER_HOME"; rm -f "$HOME/Library/Preferences/$CODEX_SWITCHER_DEFAULTS_SUITE.plist"' EXIT
 
 fail() {

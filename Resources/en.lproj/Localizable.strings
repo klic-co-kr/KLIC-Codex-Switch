@@ -93,6 +93,9 @@
 "alert_target_auth_refresh_failed_msg" = "The selected account credentials are expired or revoked. Sign in to that account once, then retry.";
 "alert_target_auth_invalid_msg" = "The selected account auth data could not be read. Add that account again, then retry.";
 "alert_relaunch_failed" = "Codex relaunch failed";
+"alert_switch_rolled_back" = "Switch failed — previous account restored";
+"alert_rollback_failed" = "Switch failed and rollback is incomplete";
+"alert_switch_in_progress" = "Another account switch is already in progress.";
 "alert_device_login_failed" = "Device-code login failed";
 "alert_maintenance_failed" = "%@ failed";
 "alert_switch_scope_disabled" = "No switch target enabled";
@@ -133,6 +136,7 @@
 "threshold_5h" = "5h switch ≤ %@%%";
 "threshold_weekly" = "Weekly switch ≤ %@%%";
 "all_limits_reached" = "All accounts near limit";
+"rotation_unverified" = "Auto-switch held — target UNVERIFIED";
 "status_rotation" = "%@ ⟳";
 
 /* Months */

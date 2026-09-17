@@ -25,6 +25,9 @@ struct CodexAccount {
     let fiveHourResetAt: Date?
     let weeklyResetAt: Date?
     let isActive: Bool
+    /// True only when a usage fetch actually returned a window for this
+    /// account. Unknown usage must never look like a healthy switch target.
+    let usageVerified: Bool
 }
 
 private struct SwitchScope {
@@ -282,11 +285,14 @@ enum RotationDecision: String {
     case none
     case switchTarget = "switch"
     case allExhausted = "all-exhausted"
+    case unverified
 }
 
 /// A usage window is "over limit" when its remaining (100 - used) is at or below
-/// the remaining-% threshold. Unknown (nil) usage counts as NOT over, so missing
-/// data never triggers a switch or a false all-exhausted warning.
+/// the remaining-% threshold. Unknown (nil) usage counts as NOT over at the
+/// window level — but an account whose usage was never fetched is UNVERIFIED
+/// and blocked upstream in decideRotation, so missing data can never trigger
+/// a blind switch or a false all-exhausted warning.
 func windowOverLimit(usedPercent: Int?, remainingThreshold: Int) -> Bool {
     guard let used = usedPercent else { return false }
     let clamped = min(max(used, 0), 100)
@@ -298,8 +304,11 @@ func accountOverLimit(fiveHourUsed: Int?, weeklyUsed: Int?, threshold5h: Int, th
         windowOverLimit(usedPercent: weeklyUsed, remainingThreshold: thresholdWeekly)
 }
 
-func decideRotation(activeOverLimit: Bool, inactiveOverLimit: Bool) -> RotationDecision {
+/// An unverified inactive account is never a switch target: a failed usage
+/// fetch used to read as "not over limit" and trigger a blind auto-switch.
+func decideRotation(activeOverLimit: Bool, inactiveOverLimit: Bool, inactiveVerified: Bool) -> RotationDecision {
     guard activeOverLimit else { return .none }
+    guard inactiveVerified else { return .unverified }
     return inactiveOverLimit ? .allExhausted : .switchTarget
 }
 
@@ -650,10 +659,8 @@ private func cliSyncActiveSnapshot() -> String? {
            mainEmail != storedEmail {
             return "Current Codex auth account (\(mainEmail)) does not match active account (\(activeKey))."
         }
-        if FileManager.default.fileExists(atPath: accountAuthURL.path) {
-            try FileManager.default.removeItem(at: accountAuthURL)
-        }
-        try FileManager.default.copyItem(at: activeAuthURL, to: accountAuthURL)
+        let activeData = try Data(contentsOf: activeAuthURL)
+        try atomicWriteAuthFile(activeData, to: accountAuthURL.path)
         return nil
     } catch {
         return error.localizedDescription
@@ -1136,6 +1143,202 @@ private func makeSessionMarkerFinder() -> SessionMarkerFinder {
     SessionMarkerFinder(codexHome: URL(fileURLWithPath: codexHomeDirectory()).appendingPathComponent(".codex", isDirectory: true))
 }
 
+/// Write auth data atomically: temp file in the same directory + rename, so
+/// no reader can ever observe a missing auth.json. Permissions are pinned to
+/// 0600 because the file carries live tokens.
+private func atomicWriteAuthFile(_ data: Data, to path: String) throws {
+    try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    try? FileManager.default.setAttributes(
+        [.posixPermissions: 0o600], ofItemAtPath: path)
+}
+
+// MARK: - Single-Writer Switch Lock
+
+enum SwitchLockError: Error {
+    case held(ownerPID: Int32)
+}
+
+private func switchLockPath() -> String {
+    "\(codexHomeDirectory())/.codex/.account-switch.lock"
+}
+
+/// O_EXCL lock shared by the GUI and CLI switch paths so a second click or a
+/// concurrent `switch` command can never start a duplicate transition. A lock
+/// whose owner PID is gone is reclaimed; an unreadable owner is retried once
+/// after a short delay to cover the create/write window.
+private func acquireSwitchLock() throws -> Int32 {
+    let path = switchLockPath()
+    for attempt in 0..<2 {
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        if fd >= 0 {
+            var pid = ProcessInfo.processInfo.processIdentifier
+            withUnsafeBytes(of: &pid) { _ = write(fd, $0.baseAddress!, $0.count) }
+            return fd
+        }
+        guard errno == EEXIST else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [
+                NSLocalizedDescriptionKey: String(cString: strerror(errno))])
+        }
+        if let owner = switchLockOwnerPID(path: path), owner > 0 {
+            if kill(owner, 0) == 0 || errno == EPERM {
+                throw SwitchLockError.held(ownerPID: owner)
+            }
+            try? FileManager.default.removeItem(atPath: path)
+            continue
+        }
+        // Owner PID not yet written — the holder may be mid-create. Give it a
+        // moment, then treat a still-empty lock as stale.
+        if attempt == 0 {
+            Thread.sleep(forTimeInterval: 0.15)
+            continue
+        }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+    throw SwitchLockError.held(ownerPID: -1)
+}
+
+private func switchLockOwnerPID(path: String) -> Int32? {
+    guard let data = FileManager.default.contents(atPath: path), data.count >= MemoryLayout<Int32>.size else {
+        return nil
+    }
+    return data.withUnsafeBytes { $0.load(as: Int32.self) }
+}
+
+private func releaseSwitchLock(_ fd: Int32) {
+    close(fd)
+    try? FileManager.default.removeItem(atPath: switchLockPath())
+}
+
+// MARK: - Post-Switch Verification
+
+/// Readiness = the app-server socket accepts a connection. A surviving socket
+/// file with no listener refuses instantly, so connect() alone distinguishes
+/// "process running" from "session loaded".
+private func unixSocketConnectable(path: String) -> Bool {
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+    let bytes = Array(path.utf8CString)
+    // sun_len(1) + sun_family(1) precede sun_path on Darwin — fixed ABI.
+    guard bytes.count <= 104 else { return false }
+    withUnsafeMutableBytes(of: &addr) { raw in
+        _ = memcpy(raw.baseAddress!.advanced(by: 2), bytes, bytes.count)
+    }
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+    return withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
+        }
+    }
+}
+
+private func waitForUnixSocket(path: String, timeout: TimeInterval) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+        if unixSocketConnectable(path: path) { return true }
+        Thread.sleep(forTimeInterval: 0.5)
+    } while Date() < deadline
+    return unixSocketConnectable(path: path)
+}
+
+/// Presence check only — confirms the file parses and the key is non-empty.
+/// The token value is never logged, printed, or stored elsewhere.
+private func devinCredentialPresent(path: String) -> Bool {
+    guard let data = FileManager.default.contents(atPath: path),
+          let text = String(data: data, encoding: .utf8) else { return false }
+    for line in text.split(separator: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("windsurf_api_key"),
+              let eq = trimmed.firstIndex(of: "=") else { continue }
+        let value = trimmed[trimmed.index(after: eq)...]
+            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        return !value.isEmpty
+    }
+    return false
+}
+
+private func endpointHealthFailure(base: String, name: String) -> String? {
+    guard let url = URL(string: "\(base)/health") else { return "\(name): invalid URL" }
+    let result = httpGet(url: url, headers: [:])
+    guard let status = result.response?.statusCode else {
+        return "\(name) unreachable at \(base)"
+    }
+    guard (200..<300).contains(status) else {
+        return "\(name) /health returned HTTP \(status)"
+    }
+    return nil
+}
+
+private func endpointModelsFailure(base: String, requiredModel: String, name: String) -> String? {
+    guard let url = URL(string: "\(base)/v1/models") else { return "\(name): invalid URL" }
+    let result = httpGet(url: url, headers: ["Authorization": "Bearer local-devin-key"])
+    guard let status = result.response?.statusCode else {
+        return "\(name) /v1/models unreachable at \(base)"
+    }
+    guard (200..<300).contains(status) else {
+        return "\(name) /v1/models returned HTTP \(status)"
+    }
+    guard let data = result.data,
+          let body = String(data: data, encoding: .utf8),
+          body.contains("\"\(requiredModel)\"") else {
+        return "\(name) model catalog missing \(requiredModel)"
+    }
+    return nil
+}
+
+/// Post-swap verification shared by GUI and CLI. Returns human-readable
+/// failure strings; empty means every checked component is on the new state.
+/// CODEX_SWITCHER_VERIFY_CHAIN=off skips remote checks for isolated tests;
+/// the per-service env vars redirect endpoints so fixtures can stand in.
+private func verifySwitchChain(appRelaunched: Bool, home: String) -> [String] {
+    let env = ProcessInfo.processInfo.environment
+    if env["CODEX_SWITCHER_VERIFY_CHAIN"] == "off" { return [] }
+    var failures: [String] = []
+
+    if appRelaunched {
+        let socketPath = env["CODEX_SWITCHER_APP_SOCKET"]
+            ?? "\(home)/.codex/ipc/ipc.sock"
+        if !waitForUnixSocket(path: socketPath, timeout: 20) {
+            failures.append("Codex app-server did not become ready")
+        }
+    }
+
+    let credPath = env["CODEX_SWITCHER_DEVIN_CREDENTIALS"]
+        ?? "\(home)/.local/share/devin/credentials.toml"
+    if !devinCredentialPresent(path: credPath) {
+        failures.append("Devin credential missing or empty")
+    }
+    let devinBase = env["CODEX_SWITCHER_DEVIN_URL"] ?? "http://127.0.0.1:8347"
+    if let failure = endpointHealthFailure(base: devinBase, name: "Devin provider") {
+        failures.append(failure)
+    } else if let failure = endpointModelsFailure(base: devinBase, requiredModel: "swe-2-max", name: "Devin provider") {
+        failures.append(failure)
+    }
+
+    let gatewayBase = env["CODEX_SWITCHER_GATEWAY_URL"] ?? "http://127.0.0.1:8317"
+    if let failure = endpointHealthFailure(base: gatewayBase, name: "CLIProxy gateway") {
+        failures.append(failure)
+    }
+    return failures
+}
+
+/// Rollback after a post-swap failure: restore the previous account's
+/// auth.json and registry entry. Returns error strings — an empty result
+/// means the previous state is fully restored.
+private func rollbackAuthAndRegistry(previousEmail: String?) -> [String] {
+    var errors: [String] = []
+    if let e = restorePreviousAuth(previousEmail: previousEmail) {
+        errors.append("auth restore failed: \(e)")
+    }
+    if let e = cliUpdateRegistry(previousEmail) {
+        errors.append("registry restore failed: \(e)")
+    }
+    return errors
+}
+
 /// Restores ~/.codex/auth.json from the previous account's snapshot file.
 /// The source is read fully before anything is written and the final write is
 /// atomic, so a failure can never leave auth.json absent. Returns nil on
@@ -1147,13 +1350,13 @@ func restorePreviousAuth(previousEmail: String?) -> String? {
     let home = codexHomeDirectory()
     let encoded = encodeKey(previousEmail)
     let previousAuthURL = URL(fileURLWithPath: "\(home)/.codex/accounts/\(encoded).auth.json")
-    let mainAuthURL = URL(fileURLWithPath: "\(home)/.codex/auth.json")
+    let mainAuthPath = "\(home)/.codex/auth.json"
     guard FileManager.default.fileExists(atPath: previousAuthURL.path) else {
         return "account file missing for \(previousEmail)"
     }
     do {
         let data = try Data(contentsOf: previousAuthURL)
-        try data.write(to: mainAuthURL, options: .atomic)
+        try atomicWriteAuthFile(data, to: mainAuthPath)
         return nil
     } catch {
         return error.localizedDescription
@@ -1200,6 +1403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cachedUsageByAccount: [String: ParsedUsage] = [:]
     private var lastUsageFetch: Date?
     private var allLimitsReached = false
+    private var rotationUnverified = false
     private var continuityTestRecord: ContinuityTestRecord?
     private var isLocatingMarker = false
     private var lastSnapshotComparison: SnapshotComparison?
@@ -1361,7 +1565,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     weeklyUsedPercent: usage?.weekly?.usedPercent,
                     fiveHourResetAt: usage?.fiveHour?.resetDate,
                     weeklyResetAt: usage?.weekly?.resetDate,
-                    isActive: isActive
+                    isActive: isActive,
+                    usageVerified: usage?.fiveHour?.usedPercent != nil || usage?.weekly?.usedPercent != nil
                 ))
             }
 
@@ -1382,13 +1587,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func checkAutoRotation() {
         let wasReached = allLimitsReached
+        let wasUnverified = rotationUnverified
         guard rotationEnabled,
               accounts.count == 2,
               !isSwitching,
               let active = accounts.first(where: { $0.isActive }),
               let inactive = accounts.first(where: { !$0.isActive }) else {
             allLimitsReached = false
-            if wasReached { rebuildMenu() }
+            rotationUnverified = false
+            if wasReached || wasUnverified { rebuildMenu() }
             return
         }
 
@@ -1403,16 +1610,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             threshold5h: rotationThreshold5h,
             thresholdWeekly: rotationThresholdWeekly)
 
-        switch decideRotation(activeOverLimit: activeOver, inactiveOverLimit: inactiveOver) {
+        switch decideRotation(activeOverLimit: activeOver, inactiveOverLimit: inactiveOver, inactiveVerified: inactive.usageVerified) {
         case .switchTarget:
             allLimitsReached = false
+            rotationUnverified = false
             switchTo(key: inactive.key)
         case .allExhausted:
             allLimitsReached = true
-            if !wasReached { rebuildMenu() }
+            rotationUnverified = false
+            if !wasReached || wasUnverified { rebuildMenu() }
+        case .unverified:
+            allLimitsReached = false
+            rotationUnverified = true
+            if wasReached || !wasUnverified { rebuildMenu() }
         case .none:
             allLimitsReached = false
-            if wasReached { rebuildMenu() }
+            rotationUnverified = false
+            if wasReached || wasUnverified { rebuildMenu() }
         }
     }
 
@@ -1440,6 +1654,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(usageCombinedItem(for: active))
             if allLimitsReached {
                 menu.addItem(headerItem(NSLocalizedString("all_limits_reached", comment: ""), symbol: "exclamationmark.triangle.fill"))
+            }
+            if rotationUnverified {
+                menu.addItem(headerItem(NSLocalizedString("rotation_unverified", comment: ""), symbol: "questionmark.circle"))
             }
             menu.addItem(.separator())
         }
@@ -2259,11 +2476,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showAlert(title: NSLocalizedString("alert_switch_scope_disabled", comment: ""), message: NSLocalizedString("alert_switch_scope_disabled_msg", comment: ""))
             return
         }
+        let lockFD: Int32
+        do {
+            lockFD = try acquireSwitchLock()
+        } catch {
+            showAlert(title: NSLocalizedString("alert_switch_failed", comment: ""), message: NSLocalizedString("alert_switch_in_progress", comment: ""))
+            return
+        }
         isSwitching = true
         beginSwitchAnimation(label: displayLabel(for: target))
         rebuildMenu()
 
         DispatchQueue.global(qos: .userInitiated).async {
+            defer { releaseSwitchLock(lockFD) }
             if let syncError = self.syncActiveAuthSnapshot() {
                 DispatchQueue.main.async {
                     self.isSwitching = false
@@ -2361,7 +2586,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             do {
-                try newData.write(to: URL(fileURLWithPath: targetAuthPath), options: .atomic)
+                try atomicWriteAuthFile(newData, to: targetAuthPath)
             } catch {
                 abortSwitch("alert_switch_failed", error.localizedDescription)
                 return
@@ -2381,12 +2606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             do {
-                let targetURL = URL(fileURLWithPath: targetAuthPath)
-                let mainURL = URL(fileURLWithPath: mainAuthPath)
-                if FileManager.default.fileExists(atPath: mainAuthPath) {
-                    try FileManager.default.removeItem(at: mainURL)
-                }
-                try FileManager.default.copyItem(at: targetURL, to: mainURL)
+                try atomicWriteAuthFile(newData, to: mainAuthPath)
             } catch {
                 DispatchQueue.main.async {
                     self.isSwitching = false
@@ -2446,15 +2666,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ? self.restartCodexApp(launchIfNotRunning: scope.launchCodexIfClosed)
                 : CommandResult(status: 0, output: "Codex App reflection skipped.")
 
+            // Post-swap verification: the switch is not committed until the
+            // app-server socket, Devin provider, and CLIProxy gateway all
+            // answer on the new state. Any failure rolls auth + registry back
+            // and re-restarts the app so its in-memory session matches disk.
+            var postFailures: [String] = []
+            if let registryError {
+                postFailures.append("registry: \(registryError)")
+            }
+            if restartResult.status != 0 {
+                postFailures.append("Codex restart: \(restartResult.output)")
+            }
+            postFailures.append(contentsOf: verifySwitchChain(
+                appRelaunched: scope.reflectCodexApp && restartResult.status == 0,
+                home: home))
+
+            if !postFailures.isEmpty {
+                var rollbackErrors = rollbackAuthAndRegistry(previousEmail: previousActiveEmail)
+                if scope.reflectCodexApp {
+                    let rollbackRestart = self.restartCodexApp(launchIfNotRunning: true)
+                    if rollbackRestart.status != 0 {
+                        rollbackErrors.append("rollback restart: \(rollbackRestart.output)")
+                    }
+                }
+                DispatchQueue.main.async {
+                    self.isSwitching = false
+                    self.endSwitchAnimation()
+                    self.lastUsageFetch = nil
+                    if rollbackErrors.isEmpty {
+                        self.showAlert(
+                            title: NSLocalizedString("alert_switch_rolled_back", comment: ""),
+                            message: postFailures.joined(separator: "\n"))
+                    } else {
+                        self.showAlert(
+                            title: NSLocalizedString("alert_rollback_failed", comment: ""),
+                            message: (postFailures + rollbackErrors).joined(separator: "\n"))
+                    }
+                    self.refreshAccounts()
+                }
+                return
+            }
+
             DispatchQueue.main.async {
                 self.isSwitching = false
                 self.endSwitchAnimation()
                 self.lastUsageFetch = nil
-                if let registryError {
-                    self.showAlert(title: NSLocalizedString("alert_switch_failed", comment: ""), message: registryError)
-                } else if restartResult.status != 0 {
-                    self.showAlert(title: NSLocalizedString("alert_relaunch_failed", comment: ""), message: restartResult.output)
-                }
                 self.refreshAccounts()
             }
         }
@@ -2523,10 +2779,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? FileManager.default.removeItem(atPath: accountAuthURL.deletingLastPathComponent().appendingPathComponent(file).path)
                 }
             }
-            if FileManager.default.fileExists(atPath: accountAuthURL.path) {
-                try FileManager.default.removeItem(at: accountAuthURL)
-            }
-            try FileManager.default.copyItem(at: activeAuthURL, to: accountAuthURL)
+            let activeData = try Data(contentsOf: activeAuthURL)
+            try atomicWriteAuthFile(activeData, to: accountAuthURL.path)
             return nil
         } catch {
             return error.localizedDescription
@@ -3403,7 +3657,10 @@ private func handleRotation(_ args: ArraySlice<String>) -> Never {
         let thrWeekly = RotationThresholdDefaults.value(forKey: RotationThresholdDefaults.keyWeekly)
         let activeOver = accountOverLimit(fiveHourUsed: a5, weeklyUsed: aWk, threshold5h: thr5h, thresholdWeekly: thrWeekly)
         let inactiveOver = accountOverLimit(fiveHourUsed: i5, weeklyUsed: iWk, threshold5h: thr5h, thresholdWeekly: thrWeekly)
-        print(decideRotation(activeOverLimit: activeOver, inactiveOverLimit: inactiveOver).rawValue)
+        // An account is verified when at least one usage window is known —
+        // both '-' mirrors a failed usage fetch and blocks auto-switch.
+        let inactiveVerified = i5 != nil || iWk != nil
+        print(decideRotation(activeOverLimit: activeOver, inactiveOverLimit: inactiveOver, inactiveVerified: inactiveVerified).rawValue)
         exit(0)
 
     default:
@@ -3511,6 +3768,22 @@ private func handleActive() -> Never {
     exit(0)
 }
 
+private var cliSwitchLockFD: Int32 = -1
+
+private func cliAcquireSwitchLockOrExit() {
+    do {
+        cliSwitchLockFD = try acquireSwitchLock()
+    } catch SwitchLockError.held(let pid) {
+        let owner = pid > 0 ? "pid \(pid)" : "owner unknown"
+        fputs("Error: another account switch is in progress (\(owner))\n", stderr)
+        exit(1)
+    } catch {
+        fputs("Error: switch lock failed — \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+    atexit { releaseSwitchLock(cliSwitchLockFD) }
+}
+
 private func handleSwitch(_ args: ArraySlice<String>) -> Never {
     guard let target = args.first else {
         fputs("Error: switch requires an account key or email\n", stderr)
@@ -3536,6 +3809,8 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         fputs("Error: need at least 2 accounts to switch\n", stderr)
         exit(1)
     }
+
+    cliAcquireSwitchLockOrExit()
 
     // 1. Backup current active auth
     if let syncError = cliSyncActiveSnapshot() {
@@ -3600,7 +3875,7 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         exit(1)
     }
     do {
-        try newData.write(to: URL(fileURLWithPath: targetAuthPath), options: .atomic)
+        try atomicWriteAuthFile(newData, to: targetAuthPath)
     } catch {
         fputs("Error: selected account auth file could not be updated — \(error.localizedDescription)\n", stderr)
         exit(1)
@@ -3617,14 +3892,10 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         }
     }
 
-    // 3. Copy target auth to main auth.json
+    // 3. Install target auth as main auth.json — atomic temp+rename so no
+    // reader can ever observe a missing file.
     do {
-        let targetURL = URL(fileURLWithPath: targetAuthPath)
-        let mainURL = URL(fileURLWithPath: mainAuthPath)
-        if FileManager.default.fileExists(atPath: mainAuthPath) {
-            try FileManager.default.removeItem(at: mainURL)
-        }
-        try FileManager.default.copyItem(at: targetURL, to: mainURL)
+        try atomicWriteAuthFile(newData, to: mainAuthPath)
     } catch {
         fputs("Error: switch failed — \(error.localizedDescription)\n", stderr)
         exit(1)
@@ -3656,9 +3927,11 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
         }
     }
 
-    // 4. Update registry
+    // 4. Update registry — a registry failure is part of the transaction and
+    // rolls back with everything else rather than leaving a half-switch.
+    var postFailures: [String] = []
     if let regError = cliUpdateRegistry(targetEmail) {
-        fputs("Warning: registry update failed — \(regError)\n", stderr)
+        postFailures.append("registry update failed: \(regError)")
     }
 
     // 5. Destructive-change check BEFORE the app restart, mirroring the GUI.
@@ -3678,11 +3951,37 @@ private func handleSwitch(_ args: ArraySlice<String>) -> Never {
     }
 
     // 6. Reflect in Codex App if enabled
+    var appRelaunched = false
     if scope.reflectCodexApp {
         let result = cliRestartCodex(launchIfNotRunning: scope.launchCodexIfClosed)
         if result.status != 0 {
-            fputs("Warning: Codex restart issue — \(result.output)\n", stderr)
+            postFailures.append("Codex restart: \(result.output)")
+        } else {
+            appRelaunched = true
         }
+    }
+
+    // 7. Post-swap verification: not committed until the app-server socket,
+    // Devin provider, and CLIProxy gateway all answer. Any failure restores
+    // the previous auth + registry and re-restarts the app so its in-memory
+    // session matches disk — a switch is never reported while half-applied.
+    postFailures.append(contentsOf: verifySwitchChain(appRelaunched: appRelaunched, home: home))
+
+    if !postFailures.isEmpty {
+        var rollbackErrors = rollbackAuthAndRegistry(previousEmail: previousEmail)
+        if scope.reflectCodexApp {
+            let rollbackRestart = cliRestartCodex(launchIfNotRunning: true)
+            if rollbackRestart.status != 0 {
+                rollbackErrors.append("rollback restart: \(rollbackRestart.output)")
+            }
+        }
+        fputs("Error: switch failed — \(postFailures.joined(separator: "; "))\n", stderr)
+        if rollbackErrors.isEmpty {
+            fputs("Rolled back to \(previousEmail ?? "previous account").\n", stderr)
+        } else {
+            fputs("Rollback incomplete — \(rollbackErrors.joined(separator: "; "))\n", stderr)
+        }
+        exit(1)
     }
 
     print("switched:\(match.email)")

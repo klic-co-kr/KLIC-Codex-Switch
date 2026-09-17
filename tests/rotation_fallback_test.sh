@@ -32,8 +32,13 @@ status="$(run rotation status)"
 [[ "$(run rotation decide 50 50 50 50)" == "none" ]] || fail "healthy should be none"
 # active windows unknown => not over => none
 [[ "$(run rotation decide - - 10 10)" == "none" ]] || fail "unknown active should be none"
-# active 5h over, inactive windows unknown => inactive not over => switch
-[[ "$(run rotation decide 90 10 - -)" == "switch" ]] || fail "unknown inactive counts as healthy"
+# active 5h over, inactive windows unknown => UNVERIFIED, never switch blind
+[[ "$(run rotation decide 90 10 - -)" == "unverified" ]] || fail "unknown inactive must be unverified, got: $(run rotation decide 90 10 - -)"
+# active over, inactive partially unknown but one window healthy => verified, switch
+[[ "$(run rotation decide 90 10 - 10)" == "switch" ]] || fail "one known healthy window counts as verified"
+[[ "$(run rotation decide 90 10 10 -)" == "switch" ]] || fail "one known healthy window counts as verified"
+# active over, inactive unknown on one window and over on the other => still all-exhausted
+[[ "$(run rotation decide 90 10 90 -)" == "all-exhausted" ]] || fail "verified over window should be all-exhausted"
 # boundary: remaining exactly equals threshold (used 80 -> rem 20 <= 20) => over
 [[ "$(run rotation decide 80 10 10 10)" == "switch" ]] || fail "remaining == threshold is over"
 # just above: used 79 -> rem 21 > 20 => not over => none
